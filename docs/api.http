@@ -1,0 +1,285 @@
+# CMS Backend — API Reference (HTTP)
+# Importar en Postman, Insomnia o usar con curl
+# BASE_URL = http://localhost:3000/api/v1
+
+### Variables
+@base = http://localhost:3000/api/v1
+@token = PEGAR_ACCESS_TOKEN_AQUÍ
+
+# ─────────────────────────────────────────
+#  AUTH
+# ─────────────────────────────────────────
+
+### Registrar usuario
+POST {{base}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "usuario@ejemplo.com",
+  "username": "mi_usuario",
+  "password": "Password1!",
+  "displayName": "Mi Nombre"
+}
+
+### Verificar email (OTP recibido por email)
+POST {{base}}/auth/verify-email
+Content-Type: application/json
+
+{
+  "email": "usuario@ejemplo.com",
+  "otp": "123456",
+  "type": "EMAIL_VERIFICATION"
+}
+
+### Login
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@example.com",
+  "password": "Admin1234!"
+}
+
+### Renovar access token (usa cookie refresh_token)
+POST {{base}}/auth/refresh
+
+### Mi perfil
+GET {{base}}/auth/me
+Authorization: Bearer {{token}}
+
+### Cerrar sesión
+POST {{base}}/auth/logout
+Authorization: Bearer {{token}}
+
+### Recuperar contraseña
+POST {{base}}/auth/forgot-password
+Content-Type: application/json
+
+{ "email": "usuario@ejemplo.com" }
+
+### Resetear contraseña
+POST {{base}}/auth/reset-password
+Content-Type: application/json
+
+{
+  "email": "usuario@ejemplo.com",
+  "otp": "123456",
+  "newPassword": "NuevaPass1!"
+}
+
+# ─────────────────────────────────────────
+#  POSTS / CMS
+# ─────────────────────────────────────────
+
+### Listar posts públicos
+GET {{base}}/posts?page=1&limit=10&sort=latest
+
+### Posts por categoría
+GET {{base}}/posts?categoryId=UUID_CATEGORIA&status=PUBLISHED
+
+### Posts trending (últimas 48h)
+GET {{base}}/posts?sort=trending
+
+### Buscar posts
+GET {{base}}/posts?search=nodejs&type=TUTORIAL
+
+### Post por slug
+GET {{base}}/posts/bienvenido-al-cms
+
+### Crear post (requiere rol AUTHOR o superior)
+POST {{base}}/posts
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "title": "Mi primer tutorial de Docker",
+  "content": "# Introducción\n\nEn este tutorial...",
+  "excerpt": "Aprende Docker desde cero",
+  "type": "TUTORIAL",
+  "status": "DRAFT",
+  "visibility": "PUBLIC",
+  "categoryIds": [],
+  "tagIds": [],
+  "metaTitle": "Tutorial Docker",
+  "metaDescription": "Guía completa de Docker para principiantes"
+}
+
+### Publicar post
+PATCH {{base}}/posts/UUID_DEL_POST
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "status": "PUBLISHED" }
+
+### Eliminar post
+DELETE {{base}}/posts/UUID_DEL_POST
+Authorization: Bearer {{token}}
+
+# ─────────────────────────────────────────
+#  SOCIAL
+# ─────────────────────────────────────────
+
+### Feed personalizado (siguiendo)
+GET {{base}}/social/feed?type=following&page=1
+Authorization: Bearer {{token}}
+
+### Feed discover (todos los posts)
+GET {{base}}/social/feed?type=discover
+
+### Feed trending
+GET {{base}}/social/feed?type=trending
+
+### Seguir usuario
+POST {{base}}/social/follow/UUID_USUARIO
+Authorization: Bearer {{token}}
+
+### Like a un post
+POST {{base}}/social/like
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{ "targetId": "UUID_POST", "targetType": "post" }
+
+### Perfil público de usuario
+GET {{base}}/social/users/admin
+
+### Seguidores de usuario
+GET {{base}}/social/users/admin/followers?page=1
+
+# ─────────────────────────────────────────
+#  COMENTARIOS
+# ─────────────────────────────────────────
+
+### Ver comentarios de un post
+GET {{base}}/comments?postId=UUID_POST&page=1
+
+### Crear comentario
+POST {{base}}/comments
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "postId": "UUID_POST",
+  "content": "Excelente artículo, muy bien explicado!"
+}
+
+### Responder a un comentario
+POST {{base}}/comments
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "postId": "UUID_POST",
+  "parentId": "UUID_COMENTARIO_PADRE",
+  "content": "Gracias por el comentario!"
+}
+
+### Eliminar comentario
+DELETE {{base}}/comments/UUID_COMENTARIO
+Authorization: Bearer {{token}}
+
+# ─────────────────────────────────────────
+#  MEDIA
+# ─────────────────────────────────────────
+
+### Subir imagen (multipart/form-data)
+# curl -X POST http://localhost:3000/api/v1/media/upload \
+#   -H "Authorization: Bearer $TOKEN" \
+#   -F "file=@/ruta/imagen.jpg"
+
+### Mis archivos
+GET {{base}}/media
+Authorization: Bearer {{token}}
+
+### Obtener URL firmada para subida directa
+POST {{base}}/media/presign
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "filename": "mi-imagen.jpg",
+  "contentType": "image/jpeg"
+}
+
+### Eliminar archivo
+DELETE {{base}}/media/UUID_MEDIA
+Authorization: Bearer {{token}}
+
+# ─────────────────────────────────────────
+#  ANALYTICS
+# ─────────────────────────────────────────
+
+### Trackear evento de pageview
+POST {{base}}/analytics/track
+Content-Type: application/json
+
+{
+  "sessionId": "sess_abc123",
+  "name": "pageview",
+  "category": "pageview",
+  "url": "/posts/bienvenido-al-cms",
+  "referrer": "https://google.com",
+  "duration": 45000
+}
+
+### Batch de eventos
+POST {{base}}/analytics/batch
+Content-Type: application/json
+
+{
+  "events": [
+    { "sessionId": "sess_abc", "name": "click", "category": "engagement", "properties": { "element": "cta-button" } },
+    { "sessionId": "sess_abc", "name": "scroll", "category": "engagement", "properties": { "depth": 75 } }
+  ]
+}
+
+### Dashboard de analytics (admin)
+GET {{base}}/analytics/dashboard?from=2024-01-01&to=2024-12-31
+Authorization: Bearer {{token}}
+
+### Stats de un post específico
+GET {{base}}/analytics/posts/UUID_POST?days=30
+Authorization: Bearer {{token}}
+
+# ─────────────────────────────────────────
+#  NOTIFICACIONES
+# ─────────────────────────────────────────
+
+### Mis notificaciones
+GET {{base}}/notifications?page=1&limit=20
+Authorization: Bearer {{token}}
+
+### Solo no leídas
+GET {{base}}/notifications?unread=true
+Authorization: Bearer {{token}}
+
+### Marcar todas como leídas
+PATCH {{base}}/notifications/read-all
+Authorization: Bearer {{token}}
+
+### Marcar una como leída
+PATCH {{base}}/notifications/UUID_NOTIF/read
+Authorization: Bearer {{token}}
+
+# ─────────────────────────────────────────
+#  BÚSQUEDA
+# ─────────────────────────────────────────
+
+### Buscar posts y usuarios
+GET {{base}}/search?q=nodejs&type=all&page=1
+
+### Solo posts
+GET {{base}}/search?q=docker&type=posts
+
+### Solo usuarios
+GET {{base}}/search?q=admin&type=users
+
+# ─────────────────────────────────────────
+#  HEALTH CHECK
+# ─────────────────────────────────────────
+
+### Estado del servidor
+GET http://localhost:3000/health
+
+### Métricas Prometheus (solo red interna)
+GET http://localhost:3000/metrics

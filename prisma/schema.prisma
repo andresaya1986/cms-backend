@@ -1,0 +1,360 @@
+// ─────────────────────────────────────────
+//  Prisma Schema — CMS + Red Social
+// ─────────────────────────────────────────
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────
+//  USUARIOS
+// ─────────────────────────────────────────
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  username      String    @unique
+  displayName   String?
+  bio           String?
+  avatarUrl     String?
+  coverUrl      String?
+  passwordHash  String
+  role          Role      @default(USER)
+  status        UserStatus @default(PENDING_VERIFICATION)
+
+  // Auth
+  emailVerified Boolean   @default(false)
+  twoFactorEnabled Boolean @default(false)
+  twoFactorSecret  String?
+  lastLoginAt    DateTime?
+  lastLoginIp    String?
+
+  // Timestamps
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  // Relaciones
+  posts         Post[]
+  comments      Comment[]
+  likes         Like[]
+  followers     Follow[]   @relation("UserFollowers")
+  following     Follow[]   @relation("UserFollowing")
+  notifications Notification[]
+  sessions      Session[]
+  media         Media[]
+  tags          UserTag[]
+
+  @@index([email])
+  @@index([username])
+  @@index([createdAt])
+  @@map("users")
+}
+
+model Session {
+  id            String    @id @default(uuid())
+  userId        String
+  refreshToken  String    @unique
+  userAgent     String?
+  ipAddress     String?
+  expiresAt     DateTime
+  createdAt     DateTime  @default(now())
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([refreshToken])
+  @@map("sessions")
+}
+
+// ─────────────────────────────────────────
+//  CMS — POSTS & CONTENIDO
+// ─────────────────────────────────────────
+model Post {
+  id            String    @id @default(uuid())
+  authorId      String
+  title         String
+  slug          String    @unique
+  excerpt       String?
+  content       String    // MDX / richtext
+  featuredImage String?
+  status        PostStatus @default(DRAFT)
+  type          PostType   @default(ARTICLE)
+  visibility    Visibility @default(PUBLIC)
+
+  // SEO
+  metaTitle       String?
+  metaDescription String?
+  metaKeywords    String[]
+  canonicalUrl    String?
+  ogImage         String?
+
+  // Social
+  viewCount     Int       @default(0)
+  likesCount    Int       @default(0)
+  commentsCount Int       @default(0)
+  sharesCount   Int       @default(0)
+  bookmarksCount Int      @default(0)
+
+  // Scheduling
+  publishedAt   DateTime?
+  scheduledAt   DateTime?
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime?
+
+  // Relaciones
+  author        User      @relation(fields: [authorId], references: [id])
+  categories    CategoryPost[]
+  tags          TagPost[]
+  comments      Comment[]
+  likes         Like[]
+  media         MediaPost[]
+
+  @@index([slug])
+  @@index([authorId])
+  @@index([status, publishedAt])
+  @@index([type])
+  @@map("posts")
+}
+
+model Category {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  slug        String    @unique
+  description String?
+  imageUrl    String?
+  parentId    String?
+  parent      Category? @relation("CategoryChildren", fields: [parentId], references: [id])
+  children    Category[] @relation("CategoryChildren")
+  posts       CategoryPost[]
+  createdAt   DateTime  @default(now())
+
+  @@map("categories")
+}
+
+model CategoryPost {
+  postId      String
+  categoryId  String
+  post        Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  category    Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([postId, categoryId])
+  @@map("category_posts")
+}
+
+model Tag {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  slug        String    @unique
+  description String?
+  posts       TagPost[]
+  users       UserTag[]
+  createdAt   DateTime  @default(now())
+
+  @@map("tags")
+}
+
+model TagPost {
+  postId  String
+  tagId   String
+  post    Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  tag     Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([postId, tagId])
+  @@map("tag_posts")
+}
+
+model UserTag {
+  userId  String
+  tagId   String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tag     Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([userId, tagId])
+  @@map("user_tags")
+}
+
+// ─────────────────────────────────────────
+//  SOCIAL — COMENTARIOS, LIKES, FOLLOWS
+// ─────────────────────────────────────────
+model Comment {
+  id        String    @id @default(uuid())
+  postId    String
+  authorId  String
+  parentId  String?
+  content   String
+  status    CommentStatus @default(VISIBLE)
+  likesCount Int       @default(0)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  post      Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author    User      @relation(fields: [authorId], references: [id])
+  parent    Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
+  replies   Comment[] @relation("CommentReplies")
+  likes     Like[]
+
+  @@index([postId])
+  @@index([authorId])
+  @@map("comments")
+}
+
+model Like {
+  id        String    @id @default(uuid())
+  userId    String
+  postId    String?
+  commentId String?
+  createdAt DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post      Post?     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  comment   Comment?  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@unique([userId, commentId])
+  @@index([userId])
+  @@map("likes")
+}
+
+model Follow {
+  id          String   @id @default(uuid())
+  followerId  String
+  followingId String
+  createdAt   DateTime @default(now())
+
+  follower    User     @relation("UserFollowers", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("UserFollowing", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+// ─────────────────────────────────────────
+//  MEDIA
+// ─────────────────────────────────────────
+model Media {
+  id          String    @id @default(uuid())
+  uploaderId  String
+  filename    String
+  originalName String
+  mimeType    String
+  size        Int
+  url         String
+  thumbnailUrl String?
+  bucket      String
+  key         String
+  width       Int?
+  height      Int?
+  duration    Int?      // para video, en segundos
+  altText     String?
+  caption     String?
+  createdAt   DateTime  @default(now())
+
+  uploader    User      @relation(fields: [uploaderId], references: [id])
+  posts       MediaPost[]
+
+  @@index([uploaderId])
+  @@map("media")
+}
+
+model MediaPost {
+  mediaId   String
+  postId    String
+  order     Int    @default(0)
+  media     Media  @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  post      Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@id([mediaId, postId])
+  @@map("media_posts")
+}
+
+// ─────────────────────────────────────────
+//  NOTIFICACIONES
+// ─────────────────────────────────────────
+model Notification {
+  id        String             @id @default(uuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  read      Boolean            @default(false)
+  readAt    DateTime?
+  createdAt DateTime           @default(now())
+
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────
+//  ENUMS
+// ─────────────────────────────────────────
+enum Role {
+  USER
+  AUTHOR
+  EDITOR
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  PENDING_VERIFICATION
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum PostStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+  SCHEDULED
+  ARCHIVED
+  DELETED
+}
+
+enum PostType {
+  ARTICLE
+  NEWS
+  TUTORIAL
+  REVIEW
+  SHORT         // tipo "tweet" — red social
+  GALLERY
+  VIDEO
+}
+
+enum Visibility {
+  PUBLIC
+  FOLLOWERS_ONLY
+  PRIVATE
+  UNLISTED
+}
+
+enum CommentStatus {
+  VISIBLE
+  HIDDEN
+  FLAGGED
+  DELETED
+}
+
+enum NotificationType {
+  NEW_FOLLOWER
+  POST_LIKE
+  COMMENT_LIKE
+  NEW_COMMENT
+  COMMENT_REPLY
+  POST_MENTION
+  COMMENT_MENTION
+  SYSTEM
+  WELCOME
+}
