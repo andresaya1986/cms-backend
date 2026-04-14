@@ -111,8 +111,12 @@ async function bootstrap() {
     [
       '/auth/:page/_next_tree.txt',
       '/auth/:page/_next._tree.txt',
+      '/auth/:page/__next_tree.txt',
+      '/auth/:page/__next._tree.txt',
       '/api/v1/auth/:page/_next_tree.txt',
       '/api/v1/auth/:page/_next._tree.txt',
+      '/api/v1/auth/:page/__next_tree.txt',
+      '/api/v1/auth/:page/__next._tree.txt',
     ],
     (_req, res) => {
       res.type('text/plain').status(200).send('');
