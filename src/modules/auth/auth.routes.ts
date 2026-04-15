@@ -244,6 +244,7 @@ authRouter.post('/login', validate(loginSchema), async (req, res) => {
       id: true, email: true, username: true, displayName: true,
       avatarUrl: true, role: true, status: true,
       passwordHash: true, emailVerified: true, twoFactorEnabled: true,
+      createdAt: true,
     },
   });
 
@@ -306,7 +307,7 @@ authRouter.post('/verify-2fa', validate(verifyOtpSchema), async (req, res) => {
 
   const user = await prisma.user.findUnique({
     where: { email },
-    select: { id: true, email: true, username: true, role: true },
+    select: { id: true, email: true, username: true, role: true, createdAt: true },
   });
   if (!user) throw new AppError('Usuario no encontrado', 404);
 
