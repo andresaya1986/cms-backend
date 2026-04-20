@@ -6,6 +6,7 @@ import { authenticate, authorize } from '../../shared/middleware/authenticate';
 import { validate } from '../../shared/middleware/validate';
 import { AppError } from '../../shared/errors/AppError';
 import { postsCreatedTotal } from '../../shared/config/metrics';
+import { jobs } from '../../shared/config/workers';
 
 export const cmsRouter = Router();
 
@@ -166,6 +167,12 @@ cmsRouter.post('/', authenticate, authorize('USER', 'AUTHOR', 'EDITOR', 'ADMIN',
   });
 
   postsCreatedTotal.inc({ type: post.type });
+
+  // Indexar en Elasticsearch si está publicado
+  if (status === 'PUBLISHED') {
+    jobs.indexPost(post).catch((err) => console.error('Error indexing post:', err));
+  }
+
   res.status(201).json({ data: post });
 });
 
@@ -210,6 +217,11 @@ cmsRouter.patch('/:id', authenticate, validate(updatePostSchema), async (req, re
       tags: { include: { tag: true } },
     },
   });
+
+  // Reindexar si está publicado
+  if (updated.status === 'PUBLISHED') {
+    jobs.indexPost(updated).catch((err) => console.error('Error indexing post:', err));
+  }
 
   res.json({ data: updated });
 });

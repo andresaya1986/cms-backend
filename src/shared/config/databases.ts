@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { Redis } from 'ioredis';
 import mongoose from 'mongoose';
+import { Client } from '@elastic/elasticsearch';
 import { env } from './env';
 import { logger } from './logger';
 
@@ -42,6 +43,68 @@ export async function connectMongoDB() {
   logger.info('MongoDB connected');
 }
 
+// ─── Elasticsearch (full-text search) ────
+export async function initializeElasticsearch() {
+  const esClient = new Client({
+    node: env.ELASTIC_HOST,
+    auth: { username: env.ELASTIC_USERNAME, password: env.ELASTIC_PASSWORD },
+  });
+
+  const indices = [
+    {
+      name: 'cms_posts',
+      mappings: {
+        properties: {
+          title: { type: 'text', analyzer: 'standard' },
+          slug: { type: 'keyword' },
+          excerpt: { type: 'text' },
+          content: { type: 'text' },
+          authorId: { type: 'keyword' },
+          authorUsername: { type: 'keyword' },
+          categories: { type: 'keyword' },
+          tags: { type: 'keyword' },
+          publishedAt: { type: 'date' },
+          viewCount: { type: 'integer' },
+          likesCount: { type: 'integer' },
+        },
+      } as any,
+    },
+    {
+      name: 'cms_users',
+      mappings: {
+        properties: {
+          username: { type: 'keyword' },
+          displayName: { type: 'text' },
+          bio: { type: 'text' },
+        },
+      } as any,
+    },
+  ];
+
+  try {
+    for (const index of indices) {
+      try {
+        const exists = await esClient.indices.exists({ index: index.name });
+        if (!exists) {
+          await esClient.indices.create({
+            index: index.name,
+            mappings: index.mappings,
+          });
+          logger.info(`Elasticsearch index '${index.name}' created`);
+        }
+      } catch (err: any) {
+        // Si el índice ya existe, no hay problema
+        if (err.name !== 'ResourceAlreadyExistsException') {
+          throw err;
+        }
+      }
+    }
+    logger.info('Elasticsearch indices initialized');
+  } catch (err: any) {
+    logger.warn({ err }, 'Elasticsearch initialization warning (search may not work)');
+  }
+}
+
 // ─── Bootstrap ────────────────────────────
 export async function connectDatabases() {
   await prisma.$connect();
@@ -53,6 +116,7 @@ export async function connectDatabases() {
   }
 
   await connectMongoDB();
+  await initializeElasticsearch();
 }
 
 export async function closeDatabases() {

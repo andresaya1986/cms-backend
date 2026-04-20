@@ -1,0 +1,9 @@
+{
+  "mappings": {
+    "properties": {
+      "username": { "type": "keyword" },
+      "displayName": { "type": "text" },
+      "bio": { "type": "text" }
+    }
+  }
+}

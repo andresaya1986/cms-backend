@@ -4,6 +4,9 @@ import { z } from 'zod';
 import { validate } from '../../shared/middleware/validate';
 import { env } from '../../shared/config/env';
 import { AppError } from '../../shared/errors/AppError';
+import { authenticate, authorize } from '../../shared/middleware/authenticate';
+import { prisma } from '../../shared/config/databases';
+import { logger } from '../../shared/config/logger';
 
 export const searchRouter = Router();
 
@@ -67,7 +70,19 @@ searchRouter.get('/', validate(searchSchema), async (req, res) => {
       page,
       limit,
     });
+    return;
   } catch (err: any) {
+    // Si los índices no existen, retornar búsqueda vacía
+    if (err.name === 'ResponseError' && err.meta?.body?.error?.type === 'index_not_found_exception') {
+      return res.json({
+        query: q,
+        total: 0,
+        results: [],
+        page,
+        limit,
+        warning: 'Los índices de búsqueda aún no están inicializados',
+      });
+    }
     // Si Elasticsearch no está disponible, degradar gracefully
     if (err.name === 'ConnectionError') {
       throw new AppError('Servicio de búsqueda temporalmente no disponible', 503);
@@ -123,3 +138,54 @@ export async function deletePostIndex(postId: string) {
     await esClient.delete({ index: 'cms_posts', id: postId });
   } catch {}
 }
+
+// ─────────────────────────────────────────
+//  POST /api/v1/search/reindex
+//  Reindexar todos los posts en Elasticsearch
+//  (En desarrollo: sin autenticación requerida)
+// ─────────────────────────────────────────
+searchRouter.post('/reindex', async (req, res) => {
+  try {
+    logger.info('Starting full reindex of posts');
+
+    // Obtener todos los posts publicados
+    const posts = await prisma.post.findMany({
+      where: { status: 'PUBLISHED', deletedAt: null },
+      include: {
+        author: { select: { id: true, username: true, displayName: true } },
+        categories: { include: { category: true } },
+        tags: { include: { tag: true } },
+      },
+    });
+
+    logger.info({ count: posts.length }, 'Found posts to index');
+
+    // Indexar cada post
+    let indexed = 0;
+    let failed = 0;
+
+    for (const post of posts) {
+      try {
+        await indexPost(post);
+        indexed++;
+      } catch (err) {
+        logger.warn({ postId: post.id, err }, 'Failed to index post');
+        failed++;
+      }
+    }
+
+    logger.info({ indexed, failed }, 'Reindex complete');
+
+    res.json({
+      message: 'Reindex completado',
+      stats: {
+        total: posts.length,
+        indexed,
+        failed,
+      },
+    });
+  } catch (err) {
+    logger.error({ err }, 'Reindex failed');
+    throw err;
+  }
+});
