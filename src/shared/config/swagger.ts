@@ -31,6 +31,7 @@ const openApiDefinition = {
     { name: 'Media', description: 'Subida y gestión de archivos' },
     { name: 'Search', description: 'Búsqueda full-text con Elasticsearch' },
     { name: 'Comments', description: 'Comentarios y respuestas en posts' },
+    { name: 'Reactions', description: 'Reacciones tipo LinkedIn (like, love, care, haha, wow, sad, angry)' },
   ],
   components: {
     securitySchemes: {
@@ -200,6 +201,55 @@ const openApiDefinition = {
         properties: {
           filename: { type: 'string', example: 'banner-post.jpg' },
           mimeType: { type: 'string', example: 'image/jpeg' },
+        },
+      },
+      // ── Reactions ──────────────────────
+      ReactionBody: {
+        type: 'object',
+        required: ['type'],
+        properties: {
+          type: { type: 'string', enum: ['LIKE', 'LOVE', 'CARE', 'HAHA', 'WOW', 'SAD', 'ANGRY'], example: 'LOVE', description: 'Tipo de reacción' },
+          postId: { type: 'string', format: 'uuid', example: 'b2c3d4e5-f6a7-8901-bcde-f01234567890', description: 'UUID del post (requerido si no hay commentId)' },
+          commentId: { type: 'string', format: 'uuid', example: 'f6a7b8c9-d0e1-2345-fabc-de1234567890', description: 'UUID del comentario (requerido si no hay postId)' },
+        },
+      },
+      ReactionResponse: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid', example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' },
+          userId: { type: 'string', format: 'uuid', example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' },
+          postId: { type: 'string', format: 'uuid', example: 'b2c3d4e5-f6a7-8901-bcde-f01234567890', nullable: true },
+          commentId: { type: 'string', format: 'uuid', example: 'f6a7b8c9-d0e1-2345-fabc-de1234567890', nullable: true },
+          type: { type: 'string', enum: ['LIKE', 'LOVE', 'CARE', 'HAHA', 'WOW', 'SAD', 'ANGRY'], example: 'LOVE' },
+          createdAt: { type: 'string', format: 'date-time', example: '2026-04-15T20:00:00.000Z' },
+          user: $ref('AuthorPublic'),
+        },
+      },
+      ReactionsCountResponse: {
+        type: 'object',
+        properties: {
+          LIKE: { type: 'integer', example: 45 },
+          LOVE: { type: 'integer', example: 12 },
+          CARE: { type: 'integer', example: 3 },
+          HAHA: { type: 'integer', example: 8 },
+          WOW: { type: 'integer', example: 6 },
+          SAD: { type: 'integer', example: 2 },
+          ANGRY: { type: 'integer', example: 1 },
+          total: { type: 'integer', example: 77 },
+        },
+      },
+      UserReactionResponse: {
+        type: 'object',
+        properties: {
+          userId: { type: 'string', format: 'uuid', example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' },
+          type: { type: 'string', enum: ['LIKE', 'LOVE', 'CARE', 'HAHA', 'WOW', 'SAD', 'ANGRY'], example: 'LOVE' },
+          user: $ref('AuthorPublic'),
+        },
+      },
+      MyReactionResponse: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['LIKE', 'LOVE', 'CARE', 'HAHA', 'WOW', 'SAD', 'ANGRY'], example: 'LOVE', nullable: true, description: 'null si no tiene reacción' },
         },
       },
     },
@@ -1212,6 +1262,192 @@ const openApiDefinition = {
         responses: {
           '200': { description: 'Comentario eliminado', content: { 'application/json': { example: { message: 'Comentario eliminado' } } } },
           '403': { description: 'Sin permisos', content: { 'application/json': { schema: $ref('ErrorResponse') } } },
+        },
+      },
+    },
+
+    // ────────────────────────────────────────────────
+    //  REACTIONS
+    // ────────────────────────────────────────────────
+    '/api/v1/reactions': {
+      post: {
+        tags: ['Reactions'],
+        summary: 'Crear o actualizar reacción',
+        description: 'Toggle una reacción en un post o comentario. Si ya existe del mismo tipo, la elimina. Si existe de diferente tipo, la actualiza.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: $ref('ReactionBody'),
+              examples: {
+                reaccion_post: {
+                  summary: 'Reaccionar a un post',
+                  value: { type: 'LOVE', postId: 'b2c3d4e5-f6a7-8901-bcde-f01234567890' },
+                },
+                reaccion_comentario: {
+                  summary: 'Reaccionar a un comentario',
+                  value: { type: 'HAHA', commentId: 'f6a7b8c9-d0e1-2345-fabc-de1234567890' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': {
+            description: 'Reacción creada',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: $ref('ReactionResponse'),
+                    action: { type: 'string', enum: ['created', 'updated', 'deleted'] },
+                  },
+                },
+                example: {
+                  data: {
+                    id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+                    userId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+                    type: 'LOVE',
+                    postId: 'b2c3d4e5-f6a7-8901-bcde-f01234567890',
+                    createdAt: '2026-04-15T20:00:00.000Z',
+                    user: { id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890', username: 'johndoe', displayName: 'John Doe', avatarUrl: null },
+                  },
+                  action: 'created',
+                },
+              },
+            },
+          },
+          '200': { description: 'Reacción actualizada o eliminada', content: { 'application/json': { schema: { type: 'object' } } } },
+          '400': { description: 'Datos inválidos', content: { 'application/json': { schema: $ref('ErrorResponse') } } },
+          '404': { description: 'Post o comentario no encontrado', content: { 'application/json': { schema: $ref('ErrorResponse') } } },
+        },
+      },
+      get: {
+        tags: ['Reactions'],
+        summary: 'Listar usuarios que reaccionaron',
+        description: 'Devuelve la lista de usuarios que reaccionaron a un post o comentario, con sus tipos de reacción.',
+        parameters: [
+          { in: 'query', name: 'postId', schema: { type: 'string', format: 'uuid' }, example: 'b2c3d4e5-f6a7-8901-bcde-f01234567890' },
+          { in: 'query', name: 'commentId', schema: { type: 'string', format: 'uuid' }, example: 'f6a7b8c9-d0e1-2345-fabc-de1234567890' },
+          { in: 'query', name: 'type', schema: { type: 'string', enum: ['LIKE', 'LOVE', 'CARE', 'HAHA', 'WOW', 'SAD', 'ANGRY'] }, example: 'LOVE' },
+        ],
+        responses: {
+          '200': {
+            description: 'Lista de reacciones',
+            content: {
+              'application/json': {
+                example: {
+                  data: [
+                    {
+                      userId: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+                      type: 'LOVE',
+                      user: { id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890', username: 'johndoe', displayName: 'John Doe', avatarUrl: null },
+                    },
+                    {
+                      userId: 'b2c3d4e5-f6a7-8901-bcde-f01234567890',
+                      type: 'LOVE',
+                      user: { id: 'b2c3d4e5-f6a7-8901-bcde-f01234567890', username: 'janedoe', displayName: 'Jane Doe', avatarUrl: null },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+
+    '/api/v1/reactions/count': {
+      get: {
+        tags: ['Reactions'],
+        summary: 'Contar reacciones por tipo',
+        description: 'Devuelve el conteo de reacciones por tipo para un post o comentario.',
+        parameters: [
+          { in: 'query', name: 'postId', schema: { type: 'string', format: 'uuid' }, example: 'b2c3d4e5-f6a7-8901-bcde-f01234567890' },
+          { in: 'query', name: 'commentId', schema: { type: 'string', format: 'uuid' }, example: 'f6a7b8c9-d0e1-2345-fabc-de1234567890' },
+        ],
+        responses: {
+          '200': {
+            description: 'Conteo de reacciones',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: $ref('ReactionsCountResponse'),
+                  },
+                },
+                example: {
+                  data: {
+                    LIKE: 45,
+                    LOVE: 12,
+                    CARE: 3,
+                    HAHA: 8,
+                    WOW: 6,
+                    SAD: 2,
+                    ANGRY: 1,
+                    total: 77,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+
+    '/api/v1/reactions/my-reaction': {
+      get: {
+        tags: ['Reactions'],
+        summary: 'Obtener mi reacción',
+        description: 'Devuelve el tipo de reacción del usuario actual en un post o comentario. Devuelve null si no ha reaccionado.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { in: 'query', name: 'postId', schema: { type: 'string', format: 'uuid' }, example: 'b2c3d4e5-f6a7-8901-bcde-f01234567890' },
+          { in: 'query', name: 'commentId', schema: { type: 'string', format: 'uuid' }, example: 'f6a7b8c9-d0e1-2345-fabc-de1234567890' },
+        ],
+        responses: {
+          '200': {
+            description: 'Reacción del usuario',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    data: $ref('MyReactionResponse'),
+                  },
+                },
+                examples: {
+                  con_reaccion: {
+                    summary: 'Usuario tienen reacción',
+                    value: { data: { type: 'LOVE' } },
+                  },
+                  sin_reaccion: {
+                    summary: 'Usuario no ha reaccionado',
+                    value: { data: { type: null } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+
+    '/api/v1/reactions/{id}': {
+      delete: {
+        tags: ['Reactions'],
+        summary: 'Eliminar reacción',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' }, example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890' },
+        ],
+        responses: {
+          '200': { description: 'Reacción eliminada', content: { 'application/json': { example: { message: 'Reaction deleted' } } } },
+          '403': { description: 'Sin permisos', content: { 'application/json': { schema: $ref('ErrorResponse') } } },
+          '404': { description: 'Reacción no encontrada', content: { 'application/json': { schema: $ref('ErrorResponse') } } },
         },
       },
     },

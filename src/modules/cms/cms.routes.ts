@@ -69,12 +69,13 @@ cmsRouter.get('/', validate(listPostsSchema), async (req, res) => {
     }),
   };
 
-  const orderBy: any = {
+  const sortMap = {
     latest: { createdAt: 'desc' },
     oldest: { createdAt: 'asc' },
     popular: { viewCount: 'desc' },
-    trending: { likesCount: 'desc' },
-  }[sort];
+    trending: { reactionsCount: 'desc' },
+  } as const;
+  const orderBy = sortMap[sort as keyof typeof sortMap] || { createdAt: 'desc' };
 
   const [posts, total] = await Promise.all([
     prisma.post.findMany({
@@ -85,7 +86,7 @@ cmsRouter.get('/', validate(listPostsSchema), async (req, res) => {
       select: {
         id: true, title: true, slug: true, excerpt: true,
         featuredImage: true, status: true, type: true,
-        viewCount: true, likesCount: true, commentsCount: true,
+        viewCount: true, reactionsCount: true, commentsCount: true,
         publishedAt: true, createdAt: true,
         author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
         categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
@@ -133,7 +134,7 @@ cmsRouter.get('/:slug', async (req, res) => {
 // ─────────────────────────────────────────
 //  POST /api/v1/posts — Crear post
 // ─────────────────────────────────────────
-cmsRouter.post('/', authenticate, authorize('AUTHOR', 'EDITOR', 'ADMIN', 'SUPER_ADMIN'), validate(createPostSchema), async (req, res) => {
+cmsRouter.post('/', authenticate, authorize('USER', 'AUTHOR', 'EDITOR', 'ADMIN', 'SUPER_ADMIN'), validate(createPostSchema), async (req, res) => {
   const { title, content, excerpt, type, status, visibility, featuredImage,
     categoryIds, tagIds, metaTitle, metaDescription, metaKeywords, scheduledAt } = req.body;
 
@@ -224,7 +225,7 @@ cmsRouter.delete('/:id', authenticate, async (req, res) => {
   if (!post) throw new AppError('Post no encontrado', 404);
 
   const isOwner = post.authorId === req.user!.id;
-  const isAdmin = ['ADMIN', 'SUPER_ADMIN'].includes(req.user!.role);
+  const isAdmin = ['ADMIN', 'SUPER_ADMIN', 'EDITOR'].includes(req.user!.role);
   if (!isOwner && !isAdmin) throw new AppError('Sin permisos', 403);
 
   await prisma.post.update({

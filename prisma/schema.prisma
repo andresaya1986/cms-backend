@@ -40,7 +40,7 @@ model User {
   // Relaciones
   posts         Post[]
   comments      Comment[]
-  likes         Like[]
+  reactions     Reaction[]
   followers     Follow[]   @relation("UserFollowers")
   following     Follow[]   @relation("UserFollowing")
   notifications Notification[]
@@ -93,7 +93,7 @@ model Post {
 
   // Social
   viewCount     Int       @default(0)
-  likesCount    Int       @default(0)
+  reactionsCount Int      @default(0)
   commentsCount Int       @default(0)
   sharesCount   Int       @default(0)
   bookmarksCount Int      @default(0)
@@ -111,7 +111,7 @@ model Post {
   categories    CategoryPost[]
   tags          TagPost[]
   comments      Comment[]
-  likes         Like[]
+  reactions     Reaction[]
   media         MediaPost[]
 
   @@index([slug])
@@ -188,7 +188,7 @@ model Comment {
   parentId  String?
   content   String
   status    CommentStatus @default(VISIBLE)
-  likesCount Int       @default(0)
+  reactionsCount Int       @default(0)
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
@@ -197,28 +197,30 @@ model Comment {
   author    User      @relation(fields: [authorId], references: [id])
   parent    Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
   replies   Comment[] @relation("CommentReplies")
-  likes     Like[]
+  reactions Reaction[]
 
   @@index([postId])
   @@index([authorId])
   @@map("comments")
 }
 
-model Like {
-  id        String    @id @default(uuid())
+model Reaction {
+  id        String         @id @default(uuid())
   userId    String
   postId    String?
   commentId String?
-  createdAt DateTime  @default(now())
+  type      ReactionType   @default(LIKE)
+  createdAt DateTime       @default(now())
 
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  post      Post?     @relation(fields: [postId], references: [id], onDelete: Cascade)
-  comment   Comment?  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post      Post?          @relation(fields: [postId], references: [id], onDelete: Cascade)
+  comment   Comment?       @relation(fields: [commentId], references: [id], onDelete: Cascade)
 
   @@unique([userId, postId])
   @@unique([userId, commentId])
   @@index([userId])
-  @@map("likes")
+  @@index([type])
+  @@map("reactions")
 }
 
 model Follow {
@@ -234,6 +236,16 @@ model Follow {
   @@index([followerId])
   @@index([followingId])
   @@map("follows")
+}
+
+enum ReactionType {
+  LIKE
+  LOVE
+  CARE
+  HAHA
+  WOW
+  SAD
+  ANGRY
 }
 
 // ─────────────────────────────────────────

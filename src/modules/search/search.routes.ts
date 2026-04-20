@@ -61,7 +61,7 @@ searchRouter.get('/', validate(searchSchema), async (req, res) => {
         id: h._id,
         index: h._index,
         score: h._score,
-        ...h._source,
+        ...(h._source as Record<string, any>),
         highlight: h.highlight,
       })),
       page,

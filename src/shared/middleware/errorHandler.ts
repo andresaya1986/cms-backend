@@ -7,15 +7,16 @@ export function errorHandler(
   req: Request,
   res: Response,
   _next: NextFunction,
-) {
+): void {
   if (err instanceof AppError && err.isOperational) {
-    return res.status(err.statusCode).json({
+    res.status(err.statusCode).json({
       success: false,
       error: {
         message: err.message,
         ...(err.details ? { details: err.details } : {}),
       },
     });
+    return;
   }
 
   // Error inesperado — no revelar detalles al cliente

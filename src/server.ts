@@ -27,6 +27,7 @@ import { notificationsRouter } from './modules/notifications/notifications.route
 import { mediaRouter } from './modules/media/media.routes';
 import { searchRouter } from './modules/search/search.routes';
 import { commentsRouter } from './modules/comments/comments.routes';
+import { reactionsRouter } from './modules/reactions/reactions.routes';
 
 async function bootstrap() {
   // ── App Express ──────────────────────────
@@ -83,7 +84,7 @@ async function bootstrap() {
   app.use(cookieParser());
 
   // ── Logging HTTP ──────────────────────────
-  app.use(pinoHttp({ logger }));
+  app.use(pinoHttp({ logger } as any));
 
   // ── Métricas Prometheus ───────────────────
   app.use(metricsMiddleware);
@@ -135,6 +136,7 @@ async function bootstrap() {
   app.use('/api/v1/media', mediaRouter);
   app.use('/api/v1/search', searchRouter);
   app.use('/api/v1/comments', commentsRouter);
+  app.use('/api/v1/reactions', reactionsRouter);
 
   // ── Manejo de errores ─────────────────────
   app.use(notFoundHandler);

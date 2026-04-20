@@ -38,7 +38,7 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD curl -f http://localhost:3000/health || exit 1
 
-CMD ["npm", "run", "dev"]
+CMD ["sh", "-c", "npx prisma migrate deploy && npm run dev"]
 
 # ─────────────────────────────────────────
 #  PRODUCTION — imagen final mínima
@@ -71,4 +71,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 # dumb-init maneja señales PID 1 correctamente
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["node", "dist/server.js"]
+CMD ["sh", "-c", "node -e \"const {PrismaClient} = require('@prisma/client'); const prisma = new PrismaClient(); prisma.$disconnect().then(() => process.exit(0))\" && node dist/server.js"]

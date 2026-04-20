@@ -35,17 +35,51 @@ commentsRouter.get('/', async (req, res) => {
     orderBy: { createdAt: 'desc' },
     include: {
       author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      reactions: {
+        select: { type: true },
+      },
       replies: {
         where: { status: 'VISIBLE', deletedAt: null },
         orderBy: { createdAt: 'asc' },
         include: {
           author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          reactions: {
+            select: { type: true },
+          },
         },
       },
     },
   });
 
-  res.json({ data: comments });
+  // Calcular conteo de reacciones por tipo
+  const formatComment = (comment: any) => {
+    const reactionsCounts = {
+      LIKE: 0,
+      LOVE: 0,
+      CARE: 0,
+      HAHA: 0,
+      WOW: 0,
+      SAD: 0,
+      ANGRY: 0,
+    };
+
+    comment.reactions?.forEach((r: any) => {
+      if (r.type in reactionsCounts) {
+        reactionsCounts[r.type as keyof typeof reactionsCounts]++;
+      }
+    });
+
+    return {
+      ...comment,
+      reactionsCounts,
+      reactions: undefined,
+      replies: comment.replies?.map(formatComment),
+    };
+  };
+
+  const formattedComments = comments.map(formatComment);
+
+  res.json({ data: formattedComments });
 });
 
 // POST /api/v1/comments

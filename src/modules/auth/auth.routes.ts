@@ -122,17 +122,25 @@ async function verifyOtp(email: string, type: string, otp: string): Promise<bool
 }
 
 function generateTokens(userId: string, role: string) {
-  const accessToken = jwt.sign({ sub: userId, role }, env.JWT_ACCESS_SECRET, {
-    expiresIn: env.JWT_ACCESS_EXPIRES_IN,
-    issuer: env.APP_NAME,
-    audience: 'cms-api',
-  });
+  const accessToken = jwt.sign(
+    { sub: userId, role },
+    env.JWT_ACCESS_SECRET,
+    {
+      expiresIn: env.JWT_ACCESS_EXPIRES_IN,
+      issuer: env.APP_NAME,
+      audience: 'cms-api',
+    } as any
+  );
 
-  const refreshToken = jwt.sign({ sub: userId }, env.JWT_REFRESH_SECRET, {
-    expiresIn: env.JWT_REFRESH_EXPIRES_IN,
-    issuer: env.APP_NAME,
-    audience: 'cms-api',
-  });
+  const refreshToken = jwt.sign(
+    { sub: userId },
+    env.JWT_REFRESH_SECRET,
+    {
+      expiresIn: env.JWT_REFRESH_EXPIRES_IN,
+      issuer: env.APP_NAME,
+      audience: 'cms-api',
+    } as any
+  );
 
   return { accessToken, refreshToken };
 }
@@ -269,11 +277,12 @@ authRouter.post('/login', validate(loginSchema), async (req, res) => {
       { expiresIn: '10m' },
     );
 
-    return res.json({
+    res.json({
       requires2FA: true,
       tempToken,
       message: 'Código enviado a tu email',
     });
+    return;
   }
 
   // Login sin 2FA
@@ -294,6 +303,7 @@ authRouter.post('/login', validate(loginSchema), async (req, res) => {
 
   logger.info({ userId: user.id }, 'User logged in');
   res.json({ accessToken, user: safeUser });
+  return;
 });
 
 /**
