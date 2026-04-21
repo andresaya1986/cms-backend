@@ -1,14 +1,41 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import slugify from 'slugify';
+import multer from 'multer';
+import sharp from 'sharp';
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { v4 as uuid } from 'uuid';
 import { prisma } from '../../shared/config/databases';
 import { authenticate, authorize } from '../../shared/middleware/authenticate';
 import { validate } from '../../shared/middleware/validate';
 import { AppError } from '../../shared/errors/AppError';
 import { postsCreatedTotal } from '../../shared/config/metrics';
 import { jobs } from '../../shared/config/workers';
+import { env } from '../../shared/config/env';
 
 export const cmsRouter = Router();
+
+// ── S3 / MinIO Client ─────────────────────
+const s3 = new S3Client({
+  endpoint: `http${env.MINIO_USE_SSL ? 's' : ''}://${env.MINIO_ENDPOINT}:${env.MINIO_PORT}`,
+  region: 'us-east-1',
+  credentials: { accessKeyId: env.MINIO_USER, secretAccessKey: env.MINIO_PASSWORD },
+  forcePathStyle: true,
+});
+
+// ── Multer — upload de imágenes ──────────
+const uploadPostImages = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new AppError(`Tipo de archivo no permitido: ${file.mimetype}`, 400) as any);
+    }
+  },
+});
 
 // ── Esquemas ──────────────────────────────
 const createPostSchema = z.object({
@@ -246,4 +273,181 @@ cmsRouter.delete('/:id', authenticate, async (req, res) => {
   });
 
   res.json({ message: 'Post eliminado' });
+});
+
+// ─────────────────────────────────────────
+//  POST /api/v1/posts/:id/images — Subir imágenes
+// ─────────────────────────────────────────
+cmsRouter.post('/:id/images', authenticate, uploadPostImages.array('images', 10), async (req, res) => {
+  // Verificar que el post existe y pertenece al usuario
+  const post = await prisma.post.findUnique({
+    where: { id: req.params.id, deletedAt: null },
+    select: { authorId: true },
+  });
+  if (!post) throw new AppError('Post no encontrado', 404);
+
+  const isOwner = post.authorId === req.user!.id;
+  const isAdmin = ['ADMIN', 'SUPER_ADMIN', 'EDITOR'].includes(req.user!.role);
+  if (!isOwner && !isAdmin) throw new AppError('Sin permisos', 403);
+
+  if (!req.files || req.files.length === 0) {
+    throw new AppError('No se recibieron archivos', 400);
+  }
+
+  const uploadedMedia: any[] = [];
+  const files = req.files as Express.Multer.File[];
+
+  for (const file of files) {
+    const { mimetype, buffer } = file;
+    const isImage = mimetype.startsWith('image/');
+    const fileId = uuid();
+    const ext = file.originalname.split('.').pop() || 'bin';
+    const key = `posts/${req.user!.id}/${fileId}.${ext}`;
+    const thumbKey = isImage ? `posts/${req.user!.id}/${fileId}_thumb.webp` : null;
+
+    let uploadBuffer = buffer;
+    let width: number | undefined;
+    let height: number | undefined;
+    let thumbnailUrl: string | undefined;
+
+    // Procesar imagen
+    if (isImage) {
+      const meta = await sharp(buffer).metadata();
+      width = meta.width;
+      height = meta.height;
+
+      // Optimizar: convertir a webp
+      if (mimetype !== 'image/gif') {
+        uploadBuffer = await sharp(buffer)
+          .resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: 85 })
+          .toBuffer();
+      }
+
+      // Thumbnail
+      const thumbBuffer = await sharp(buffer)
+        .resize(400, 400, { fit: 'cover' })
+        .webp({ quality: 75 })
+        .toBuffer();
+
+      await s3.send(new PutObjectCommand({
+        Bucket: env.S3_BUCKET_PUBLIC,
+        Key: thumbKey!,
+        Body: thumbBuffer,
+        ContentType: 'image/webp',
+        CacheControl: 'public, max-age=31536000',
+      }));
+
+      thumbnailUrl = `http://${env.MINIO_PUBLIC_ENDPOINT}:${env.MINIO_PORT}/${env.S3_BUCKET_PUBLIC}/${thumbKey}`;
+    }
+
+    // Subir archivo
+    await s3.send(new PutObjectCommand({
+      Bucket: env.S3_BUCKET_PUBLIC,
+      Key: key,
+      Body: uploadBuffer,
+      ContentType: mimetype,
+      CacheControl: 'public, max-age=31536000',
+    }));
+
+    const url = `http://${env.MINIO_PUBLIC_ENDPOINT}:${env.MINIO_PORT}/${env.S3_BUCKET_PUBLIC}/${key}`;
+
+    // Guardar en BD
+    const media = await prisma.media.create({
+      data: {
+        uploaderId: req.user!.id,
+        filename: `${fileId}.${ext}`,
+        originalName: file.originalname,
+        mimeType: mimetype,
+        size: file.size,
+        url,
+        thumbnailUrl,
+        bucket: env.S3_BUCKET_PUBLIC,
+        key,
+        width,
+        height,
+      },
+    });
+
+    // Asociar con post
+    await prisma.mediaPost.create({
+      data: {
+        mediaId: media.id,
+        postId: req.params.id,
+        order: uploadedMedia.length,
+      },
+    });
+
+    uploadedMedia.push(media);
+  }
+
+  res.status(201).json({ data: uploadedMedia });
+});
+
+// ─────────────────────────────────────────
+//  GET /api/v1/posts/:id/images — Listar imágenes del post
+// ─────────────────────────────────────────
+cmsRouter.get('/:id/images', async (req, res) => {
+  const post = await prisma.post.findUnique({
+    where: { id: req.params.id, deletedAt: null },
+  });
+  if (!post) throw new AppError('Post no encontrado', 404);
+
+  const mediaPost = await prisma.mediaPost.findMany({
+    where: { postId: req.params.id },
+    include: { media: true },
+    orderBy: { order: 'asc' },
+  });
+
+  res.json({ data: mediaPost.map(mp => mp.media) });
+});
+
+// ─────────────────────────────────────────
+//  DELETE /api/v1/posts/:id/images/:mediaId — Remover imagen
+// ─────────────────────────────────────────
+cmsRouter.delete('/:id/images/:mediaId', authenticate, async (req, res) => {
+  const post = await prisma.post.findUnique({
+    where: { id: req.params.id, deletedAt: null },
+    select: { authorId: true },
+  });
+  if (!post) throw new AppError('Post no encontrado', 404);
+
+  const isOwner = post.authorId === req.user!.id;
+  const isAdmin = ['ADMIN', 'SUPER_ADMIN', 'EDITOR'].includes(req.user!.role);
+  if (!isOwner && !isAdmin) throw new AppError('Sin permisos', 403);
+
+  const mediaPost = await prisma.mediaPost.findUnique({
+    where: { mediaId_postId: { mediaId: req.params.mediaId, postId: req.params.id } },
+    include: { media: true },
+  });
+  if (!mediaPost) throw new AppError('Imagen no encontrada', 404);
+
+  // Eliminar de MinIO
+  if (mediaPost.media.key) {
+    await s3.send(new DeleteObjectCommand({
+      Bucket: env.S3_BUCKET_PUBLIC,
+      Key: mediaPost.media.key,
+    })).catch(() => {});
+
+    // Eliminar thumbnail si existe
+    if (mediaPost.media.key.includes('.')) {
+      const thumbKey = mediaPost.media.key.replace(/\.[^.]+$/, '_thumb.webp');
+      await s3.send(new DeleteObjectCommand({
+        Bucket: env.S3_BUCKET_PUBLIC,
+        Key: thumbKey,
+      })).catch(() => {});
+    }
+  }
+
+  // Eliminar referencias en BD
+  await Promise.all([
+    prisma.mediaPost.delete({
+      where: { mediaId_postId: { mediaId: req.params.mediaId, postId: req.params.id } },
+    }),
+    prisma.media.delete({
+      where: { id: req.params.mediaId },
+    }),
+  ]);
+
+  res.json({ message: 'Imagen eliminada' });
 });

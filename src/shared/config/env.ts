@@ -42,6 +42,7 @@ const envSchema = z.object({
 
   // MinIO / S3
   MINIO_ENDPOINT: z.string().default('minio'),
+  MINIO_PUBLIC_ENDPOINT: z.string().default('localhost'),
   MINIO_USER: z.string(),
   MINIO_PASSWORD: z.string(),
   MINIO_PORT: z.coerce.number().default(9000),

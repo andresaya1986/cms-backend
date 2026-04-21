@@ -6,6 +6,10 @@ import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import multer from 'multer';
+import sharp from 'sharp';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { v4 as uuid } from 'uuid';
 import { prisma } from '../../shared/config/databases';
 import { redis } from '../../shared/config/databases';
 import { sendOtpEmail } from '../../infrastructure/email/sendgrid';
@@ -16,6 +20,28 @@ import { AppError } from '../../shared/errors/AppError';
 import { logger } from '../../shared/config/logger';
 
 export const authRouter = Router();
+
+// ── S3 / MinIO Client ─────────────────────
+const s3 = new S3Client({
+  endpoint: `http${env.MINIO_USE_SSL ? 's' : ''}://${env.MINIO_ENDPOINT}:${env.MINIO_PORT}`,
+  region: 'us-east-1',
+  credentials: { accessKeyId: env.MINIO_USER, secretAccessKey: env.MINIO_PASSWORD },
+  forcePathStyle: true,
+});
+
+// ── Multer — avatar upload ──────────────
+const uploadAvatar = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB para avatares
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new AppError('Solo se permiten imágenes JPG, PNG o WebP', 400) as any);
+    }
+  },
+});
 
 // Algunos clientes hacen probes con HEAD antes de enviar POST.
 // Respondemos 204 para evitar falsos 404 en consola del navegador.
@@ -74,6 +100,15 @@ const resetPasswordSchema = z.object({
       .regex(/[A-Z]/)
       .regex(/[0-9]/)
       .regex(/[^a-zA-Z0-9]/),
+  }),
+});
+
+const updateProfileSchema = z.object({
+  body: z.object({
+    displayName: z.string().max(50).optional(),
+    bio: z.string().max(500).optional(),
+    avatarUrl: z.string().url('URL inválida').optional(),
+    coverUrl: z.string().url('URL inválida').optional(),
   }),
 });
 
@@ -489,4 +524,93 @@ authRouter.delete('/sessions/:id', authenticate, async (req, res) => {
     where: { id: req.params.id, userId: req.user!.id },
   });
   res.json({ message: 'Sesión eliminada' });
+});
+
+/**
+ * PATCH /api/v1/auth/profile
+ * Actualizar perfil de usuario (displayName, bio, avatarUrl, coverUrl)
+ */
+authRouter.patch('/profile', authenticate, validate(updateProfileSchema), async (req, res) => {
+  const { displayName, bio, avatarUrl, coverUrl } = req.body;
+  
+  const user = await prisma.user.update({
+    where: { id: req.user!.id },
+    data: {
+      ...(displayName !== undefined && { displayName }),
+      ...(bio !== undefined && { bio }),
+      ...(avatarUrl !== undefined && { avatarUrl }),
+      ...(coverUrl !== undefined && { coverUrl }),
+    },
+    select: {
+      id: true,
+      email: true,
+      username: true,
+      displayName: true,
+      avatarUrl: true,
+      coverUrl: true,
+      bio: true,
+      role: true,
+      emailVerified: true,
+      twoFactorEnabled: true,
+      createdAt: true,
+      _count: {
+        select: { followers: true, following: true, posts: true },
+      },
+    },
+  });
+  
+  res.json({ user });
+});
+
+/**
+ * POST /api/v1/auth/profile/avatar
+ * Subir imagen de perfil (avatar) — auto-actualiza User.avatarUrl
+ */
+authRouter.post('/profile/avatar', authenticate, uploadAvatar.single('avatar'), async (req, res) => {
+  if (!req.file) throw new AppError('No se recibió ningún archivo', 400);
+  
+  const { mimetype, buffer } = req.file;
+  const fileId = uuid();
+  const key = `avatars/${req.user!.id}/${fileId}.webp`;
+  
+  // Procesar, redimensionar y convertir a WebP (ciclo 300px para perfil)
+  const processedBuffer = await sharp(buffer)
+    .resize(300, 300, { fit: 'cover' })
+    .webp({ quality: 90 })
+    .toBuffer();
+  
+  // Subir a MinIO
+  await s3.send(new PutObjectCommand({
+    Bucket: env.S3_BUCKET_PUBLIC,
+    Key: key,
+    Body: processedBuffer,
+    ContentType: 'image/webp',
+    CacheControl: 'public, max-age=31536000',
+  }));
+  
+  const avatarUrl = `http://${env.MINIO_PUBLIC_ENDPOINT}:${env.MINIO_PORT}/${env.S3_BUCKET_PUBLIC}/${key}`;
+  
+  // Actualizar User.avatarUrl
+  const user = await prisma.user.update({
+    where: { id: req.user!.id },
+    data: { avatarUrl },
+    select: {
+      id: true,
+      email: true,
+      username: true,
+      displayName: true,
+      avatarUrl: true,
+      coverUrl: true,
+      bio: true,
+      role: true,
+      emailVerified: true,
+      twoFactorEnabled: true,
+      createdAt: true,
+      _count: {
+        select: { followers: true, following: true, posts: true },
+      },
+    },
+  });
+  
+  res.status(201).json({ user, url: avatarUrl });
 });

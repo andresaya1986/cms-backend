@@ -89,7 +89,7 @@ mediaRouter.post(
         CacheControl: 'public, max-age=31536000',
       }));
 
-      thumbnailUrl = `http://${env.MINIO_ENDPOINT}:${env.MINIO_PORT}/${env.S3_BUCKET_PUBLIC}/${thumbKey}`;
+      thumbnailUrl = `http://${env.MINIO_PUBLIC_ENDPOINT}:${env.MINIO_PORT}/${env.S3_BUCKET_PUBLIC}/${thumbKey}`;
     }
 
     // Subir archivo principal
@@ -105,7 +105,7 @@ mediaRouter.post(
       },
     }));
 
-    const url = `http://${env.MINIO_ENDPOINT}:${env.MINIO_PORT}/${env.S3_BUCKET_PUBLIC}/${key}`;
+    const url = `http://${env.MINIO_PUBLIC_ENDPOINT}:${env.MINIO_PORT}/${env.S3_BUCKET_PUBLIC}/${key}`;
 
     // Guardar en base de datos
     const media = await prisma.media.create({
