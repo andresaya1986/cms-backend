@@ -5,6 +5,8 @@ import { authenticate } from '../../shared/middleware/authenticate';
 import { validate } from '../../shared/middleware/validate';
 import { AppError } from '../../shared/errors/AppError';
 import { extractMentions, extractHashtags } from '../../shared/utils';
+import { notifyUser, notifyPostAuthor, emitCounterUpdate } from '../../shared/services/notifications.service';
+import { emitToPost } from '../../shared/config/socket';
 
 export const socialRouter = Router();
 
@@ -14,6 +16,7 @@ export const socialRouter = Router();
 socialRouter.post('/follow/:userId', authenticate, async (req, res) => {
   const followingId = req.params.userId;
   const followerId = req.user!.id;
+  const io = res.req.app.get('io');
 
   if (followerId === followingId) throw new AppError('No puedes seguirte a ti mismo', 400);
 
@@ -31,22 +34,53 @@ socialRouter.post('/follow/:userId', authenticate, async (req, res) => {
     await prisma.follow.delete({
       where: { followerId_followingId: { followerId, followingId } },
     });
+
+    // Emitir evento de unfollow en tiempo real
+    if (io) {
+      io.to(`user:${followingId}`).emit('follower:lost', {
+        followerId,
+        followerUsername: req.user!.username,
+        timestamp: new Date(),
+      });
+    }
+
     res.json({ following: false, message: `Dejaste de seguir a @${target.username}` });
     return;
   }
 
   await prisma.follow.create({ data: { followerId, followingId } });
 
-  // Notificación async
-  prisma.notification.create({
-    data: {
-      userId: followingId,
+  // Obtener follower count actualizado
+  const followerCount = await prisma.follow.count({ where: { followingId } });
+
+  // Notificación en DB + tiempo real
+  if (io) {
+    notifyUser(io, followingId, {
       type: 'NEW_FOLLOWER',
-      title: 'Nuevo seguidor',
-      body: `@${req.user!.id} te sigue ahora`,
-      data: { followerId },
-    },
-  }).catch(() => {});
+      title: `Nuevo seguidor`,
+      body: `@${req.user!.username} te sigue ahora`,
+      data: { followerId, followerUsername: req.user!.username, followerCount },
+    }).catch(() => {});
+
+    // Emitir evento de follow en tiempo real
+    io.to(`user:${followingId}`).emit('follower:gained', {
+      followerId,
+      followerUsername: req.user!.username,
+      followerCount,
+      timestamp: new Date(),
+    });
+  } else {
+    // Fallback a DB only si no hay io
+    prisma.notification.create({
+      data: {
+        userId: followingId,
+        type: 'NEW_FOLLOWER',
+        title: 'Nuevo seguidor',
+        body: `@${req.user!.username} te sigue ahora`,
+        data: { followerId },
+      },
+    }).catch(() => {});
+  }
 
   res.json({ following: true, message: `Ahora sigues a @${target.username}` });
 });
