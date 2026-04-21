@@ -134,3 +134,218 @@ commentsRouter.delete('/:id', authenticate, async (req, res) => {
 
   res.json({ message: 'Comentario eliminado' });
 });
+
+// ─────────────────────────────────────────
+//  COMENTARIOS ANIDADOS / RESPUESTAS
+// ─────────────────────────────────────────
+// GET respuestas de un comentario específico
+commentsRouter.get('/:commentId/replies', async (req, res) => {
+  const { commentId } = req.params;
+  const { page = 1, limit = 20 } = req.query as any;
+
+  // Verificar que el comentario existe y es root (no es respuesta)
+  const parentComment = await prisma.comment.findUnique({
+    where: { id: commentId },
+    select: { id: true, postId: true, parentId: true },
+  });
+
+  if (!parentComment) {
+    throw new AppError('Comentario no encontrado', 404);
+  }
+
+  if (parentComment.parentId) {
+    throw new AppError('Solo puedes obtener respuestas de comentarios raíz', 400);
+  }
+
+  // Obtener respuestas paginadas
+  const replies = await prisma.comment.findMany({
+    where: {
+      parentId: commentId,
+      status: 'VISIBLE',
+      deletedAt: null,
+    },
+    skip: (page - 1) * limit,
+    take: Number(limit),
+    orderBy: { createdAt: 'asc' },
+    include: {
+      author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      reactions: {
+        select: { userId: true, type: true },
+      },
+    },
+  });
+
+  // Formatear conteo de reacciones
+  const formattedReplies = replies.map((reply) => {
+    const reactionsCounts = {
+      LIKE: 0,
+      LOVE: 0,
+      CARE: 0,
+      HAHA: 0,
+      WOW: 0,
+      SAD: 0,
+      ANGRY: 0,
+    };
+
+    reply.reactions?.forEach((r: any) => {
+      if (r.type in reactionsCounts) {
+        reactionsCounts[r.type as keyof typeof reactionsCounts]++;
+      }
+    });
+
+    return {
+      id: reply.id,
+      content: reply.content,
+      author: reply.author,
+      createdAt: reply.createdAt,
+      updatedAt: reply.updatedAt,
+      reactionsCounts,
+      reactionsCount: reply.reactionsCount,
+    };
+  });
+
+  const totalReplies = await prisma.comment.count({
+    where: {
+      parentId: commentId,
+      status: 'VISIBLE',
+      deletedAt: null,
+    },
+  });
+
+  res.json({
+    data: formattedReplies,
+    pagination: { page: Number(page), limit: Number(limit), total: totalReplies },
+  });
+});
+
+// GET comentario específico con sus respuestas
+commentsRouter.get('/:commentId', async (req, res) => {
+  const { commentId } = req.params;
+
+  const comment = await prisma.comment.findUnique({
+    where: { id: commentId, deletedAt: null },
+    include: {
+      author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      reactions: {
+        select: { userId: true, type: true },
+      },
+      replies: {
+        where: { status: 'VISIBLE', deletedAt: null },
+        take: 5, // Mostrar solo primeras 5 respuestas por defecto
+        orderBy: { createdAt: 'asc' },
+        include: {
+          author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+          reactions: {
+            select: { type: true },
+          },
+        },
+      },
+      _count: {
+        select: { replies: true },
+      },
+    },
+  });
+
+  if (!comment) {
+    throw new AppError('Comentario no encontrado', 404);
+  }
+
+  // Formatear reacciones del comentario
+  const reactionsCounts = {
+    LIKE: 0,
+    LOVE: 0,
+    CARE: 0,
+    HAHA: 0,
+    WOW: 0,
+    SAD: 0,
+    ANGRY: 0,
+  };
+
+  comment.reactions?.forEach((r: any) => {
+    if (r.type in reactionsCounts) {
+      reactionsCounts[r.type as keyof typeof reactionsCounts]++;
+    }
+  });
+
+  // Formatear respuestas
+  const formattedReplies = comment.replies.map((reply: any) => {
+    const repliesReactionsCounts = {
+      LIKE: 0,
+      LOVE: 0,
+      CARE: 0,
+      HAHA: 0,
+      WOW: 0,
+      SAD: 0,
+      ANGRY: 0,
+    };
+
+    reply.reactions?.forEach((r: any) => {
+      if (r.type in repliesReactionsCounts) {
+        repliesReactionsCounts[r.type as keyof typeof repliesReactionsCounts]++;
+      }
+    });
+
+    return {
+      id: reply.id,
+      content: reply.content,
+      author: reply.author,
+      createdAt: reply.createdAt,
+      updatedAt: reply.updatedAt,
+      reactionsCounts: repliesReactionsCounts,
+      reactionsCount: reply.reactionsCount,
+    };
+  });
+
+  res.json({
+    data: {
+      id: comment.id,
+      content: comment.content,
+      author: comment.author,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+      reactionsCounts,
+      reactionsCount: comment.reactionsCount,
+      totalReplies: comment._count.replies,
+      replies: formattedReplies,
+      showMoreReplies: comment._count.replies > 5,
+    },
+  });
+});
+
+// PATCH /api/v1/comments/:id (editar comentario)
+const updateCommentSchema = z.object({
+  body: z.object({
+    content: z.string().min(1).max(2000),
+  }),
+});
+
+commentsRouter.patch('/:id', authenticate, validate(updateCommentSchema), async (req, res) => {
+  const { content } = req.body;
+  const { id } = req.params;
+
+  const comment = await prisma.comment.findUnique({
+    where: { id },
+    select: { authorId: true },
+  });
+
+  if (!comment) {
+    throw new AppError('Comentario no encontrado', 404);
+  }
+
+  if (comment.authorId !== req.user!.id && !['ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+    throw new AppError('Sin permisos para editar este comentario', 403);
+  }
+
+  const updatedComment = await prisma.comment.update({
+    where: { id },
+    data: { content, updatedAt: new Date() },
+    include: {
+      author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+    },
+  });
+
+  res.json({ 
+    data: updatedComment,
+    message: 'Comentario actualizado exitosamente',
+  });
+});

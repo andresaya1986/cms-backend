@@ -51,8 +51,89 @@ socialRouter.post('/follow/:userId', authenticate, async (req, res) => {
 });
 
 // ─────────────────────────────────────────
-//  LIKE / UNLIKE (post o comment)
+//  REACCIONES AVANZADAS (LIKE, LOVE, CARE, etc)
 // ─────────────────────────────────────────
+const reactionSchema = z.object({
+  body: z.object({
+    targetId: z.string().uuid(),
+    targetType: z.enum(['post', 'comment']),
+    reactionType: z.enum(['LIKE', 'LOVE', 'CARE', 'HAHA', 'WOW', 'SAD', 'ANGRY']).default('LIKE'),
+  }),
+});
+
+socialRouter.post('/react', authenticate, validate(reactionSchema), async (req, res) => {
+  const { targetId, targetType, reactionType } = req.body;
+  const userId = req.user!.id;
+
+  // Validar que el target existe
+  if (targetType === 'post') {
+    const post = await prisma.post.findUnique({ where: { id: targetId } });
+    if (!post) throw new AppError('Post no encontrado', 404);
+  } else {
+    const comment = await prisma.comment.findUnique({ where: { id: targetId } });
+    if (!comment) throw new AppError('Comentario no encontrado', 404);
+  }
+
+  const where = targetType === 'post'
+    ? { userId_postId: { userId, postId: targetId } }
+    : { userId_commentId: { userId, commentId: targetId } };
+
+  const existing = await prisma.reaction.findUnique({ where: where as any });
+
+  if (existing) {
+    // Si existe la misma reacción, removerla (toggle off)
+    if (existing.type === reactionType) {
+      await prisma.reaction.delete({ where: { id: existing.id } });
+
+      // Decrementar contador
+      if (targetType === 'post') {
+        await prisma.post.update({ where: { id: targetId }, data: { reactionsCount: { decrement: 1 } } });
+      } else {
+        await prisma.comment.update({ where: { id: targetId }, data: { reactionsCount: { decrement: 1 } } });
+      }
+
+      res.json({ reacted: false, type: null, message: 'Reacción removida' });
+      return;
+    }
+
+    // Si existe diferente reacción, reemplazarla (cambiar tipo)
+    await prisma.reaction.update({
+      where: { id: existing.id },
+      data: { type: reactionType as any },
+    });
+
+    res.json({ 
+      reacted: true, 
+      type: reactionType, 
+      message: `Reacción actualizada a ${reactionType}` 
+    });
+    return;
+  }
+
+  // Crear nueva reacción
+  await prisma.reaction.create({
+    data: {
+      userId,
+      type: reactionType as any,
+      ...(targetType === 'post' ? { postId: targetId } : { commentId: targetId }),
+    },
+  });
+
+  // Incrementar contador
+  if (targetType === 'post') {
+    await prisma.post.update({ where: { id: targetId }, data: { reactionsCount: { increment: 1 } } });
+  } else {
+    await prisma.comment.update({ where: { id: targetId }, data: { reactionsCount: { increment: 1 } } });
+  }
+
+  res.json({ 
+    reacted: true, 
+    type: reactionType, 
+    message: `Reaccionaste con ${reactionType}` 
+  });
+});
+
+// DEPRECATED: Mantener /like para compatibilidad hacia atrás, pero usar /react
 const likeSchema = z.object({
   body: z.object({
     targetId: z.string().uuid(),
@@ -100,6 +181,107 @@ socialRouter.post('/like', authenticate, validate(likeSchema), async (req, res) 
   }
 
   res.json({ liked: true });
+});
+
+// ─────────────────────────────────────────
+//  OBTENER REACCIONES (desglose por tipo)
+// ─────────────────────────────────────────
+socialRouter.get('/reactions/:targetId', async (req, res) => {
+  const { targetId } = req.params;
+  const { targetType = 'post' } = req.query;
+
+  if (!['post', 'comment'].includes(targetType as string)) {
+    throw new AppError('targetType debe ser "post" o "comment"', 400);
+  }
+
+  const where = targetType === 'post'
+    ? { postId: targetId }
+    : { commentId: targetId };
+
+  // Obtener reacciones agrupadas por tipo
+  const reactions = await prisma.reaction.groupBy({
+    by: ['type'],
+    where: where as any,
+    _count: true,
+  });
+
+  // Convertir a objeto con conteos por tipo
+  const reactionCounts = {
+    LIKE: 0,
+    LOVE: 0,
+    CARE: 0,
+    HAHA: 0,
+    WOW: 0,
+    SAD: 0,
+    ANGRY: 0,
+  };
+
+  reactions.forEach((r) => {
+    reactionCounts[r.type as keyof typeof reactionCounts] = r._count;
+  });
+
+  // Obtener usuarios que reaccionaron (últimos 10 por tipo)
+  const reactionDetails = await prisma.reaction.findMany({
+    where: where as any,
+    select: {
+      type: true,
+      user: {
+        select: { id: true, username: true, displayName: true, avatarUrl: true },
+      },
+      createdAt: true,
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 50, // límite para no traer todo
+  });
+
+  const groupedByType = Object.values(reactionCounts).reduce(
+    (acc, _) => {
+      acc[_] = [];
+      return acc;
+    },
+    {} as Record<string, any[]>
+  );
+
+  reactionDetails.forEach((r) => {
+    if (groupedByType[r.type]) {
+      groupedByType[r.type].push({
+        user: r.user,
+        reactedAt: r.createdAt,
+      });
+    }
+  });
+
+  res.json({
+    targetId,
+    targetType,
+    counts: reactionCounts,
+    total: Object.values(reactionCounts).reduce((a, b) => a + b, 0),
+    recent: groupedByType,
+  });
+});
+
+// GET mi reacción actual en un post/comentario
+socialRouter.get('/my-reaction/:targetId', authenticate, async (req, res) => {
+  const { targetId } = req.params;
+  const { targetType = 'post' } = req.query;
+  const userId = req.user!.id;
+
+  if (!['post', 'comment'].includes(targetType as string)) {
+    throw new AppError('targetType debe ser "post" o "comment"', 400);
+  }
+
+  const where = targetType === 'post'
+    ? { userId_postId: { userId, postId: targetId } }
+    : { userId_commentId: { userId, commentId: targetId } };
+
+  const myReaction = await prisma.reaction.findUnique({ where: where as any });
+
+  res.json({
+    targetId,
+    targetType,
+    hasReacted: !!myReaction,
+    type: myReaction?.type || null,
+  });
 });
 
 // ─────────────────────────────────────────
@@ -223,4 +405,228 @@ socialRouter.get('/users/:username/followers', async (req, res) => {
   });
 
   res.json({ data: followers.map((f) => ({ ...f.follower, followedAt: f.createdAt })) });
+});
+
+// GET usuarios que sigue (following)
+socialRouter.get('/users/:username/following', async (req, res) => {
+  const { page = 1, limit = 20 } = req.query as any;
+  const user = await prisma.user.findUnique({
+    where: { username: req.params.username },
+    select: { id: true },
+  });
+  if (!user) throw new AppError('Usuario no encontrado', 404);
+
+  const following = await prisma.follow.findMany({
+    where: { followerId: user.id },
+    skip: (page - 1) * limit,
+    take: Number(limit),
+    orderBy: { createdAt: 'desc' },
+    select: {
+      following: {
+        select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true },
+      },
+      createdAt: true,
+    },
+  });
+
+  res.json({ 
+    data: following.map((f) => ({ 
+      ...f.following, 
+      followedAt: f.createdAt 
+    })),
+    page,
+    limit,
+    total: following.length,
+  });
+});
+
+// ─────────────────────────────────────────
+//  ESTADO DE FOLLOW
+// ─────────────────────────────────────────
+// GET estado del follow entre usuarios
+socialRouter.get('/follow-status/:userId', authenticate, async (req, res) => {
+  const { userId: targetUserId } = req.params;
+  const userId = req.user!.id;
+
+  if (userId === targetUserId) {
+    res.json({ following: false, follower: false, message: 'Es tu propio perfil' });
+    return;
+  }
+
+  // Verificar si el usuario actual sigue al target
+  const following = await prisma.follow.findUnique({
+    where: { followerId_followingId: { followerId: userId, followingId: targetUserId } },
+  });
+
+  // Verificar si el target sigue al usuario actual (para mostrar "se siguen mutuamente")
+  const follower = await prisma.follow.findUnique({
+    where: { followerId_followingId: { followerId: targetUserId, followingId: userId } },
+  });
+
+  res.json({ 
+    following: !!following,
+    follower: !!follower,
+    mutualFollowers: following && follower,
+  });
+});
+
+// ─────────────────────────────────────────
+//  BÚSQUEDA DE USUARIOS
+// ─────────────────────────────────────────
+const searchUsersSchema = z.object({
+  query: z.object({
+    q: z.string().min(2).max(50),
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+    role: z.enum(['USER', 'ADMIN', 'SUPER_ADMIN']).optional(),
+  }),
+});
+
+socialRouter.get('/search/users', validate(searchUsersSchema), async (req, res) => {
+  const { q, page, limit, role } = req.query as any;
+  const skip = (page - 1) * limit;
+  const userId = req.user?.id; // Puede no estar autenticado
+
+  // Búsqueda con nombre, displayName o username
+  const where: any = {
+    status: 'ACTIVE',
+    deletedAt: null,
+    OR: [
+      { username: { contains: q, mode: 'insensitive' } },
+      { displayName: { contains: q, mode: 'insensitive' } },
+      { bio: { contains: q, mode: 'insensitive' } },
+    ],
+  };
+
+  // Filtro opcional por rol
+  if (role) {
+    where.role = role;
+  }
+
+  const [users, total] = await Promise.all([
+    prisma.user.findMany({
+      where,
+      skip,
+      take: Number(limit),
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        bio: true,
+        avatarUrl: true,
+        role: true,
+        _count: {
+          select: { followers: true, following: true, posts: true },
+        },
+      },
+      orderBy: { displayName: 'asc' },
+    }),
+    prisma.user.count({ where }),
+  ]);
+
+  // Si el usuario está autenticado, obtener estado de follow
+  let usersWithFollowStatus = users;
+
+  if (userId) {
+    const follows = await prisma.follow.findMany({
+      where: {
+        followerId: userId,
+        followingId: { in: users.map((u) => u.id) },
+      },
+      select: { followingId: true },
+    });
+
+    const followingIds = new Set(follows.map((f) => f.followingId));
+
+    usersWithFollowStatus = users.map((user) => ({
+      ...user,
+      isFollowing: followingIds.has(user.id),
+      isOwnProfile: user.id === userId,
+    }));
+  } else {
+    usersWithFollowStatus = users.map((user) => ({
+      ...user,
+      isFollowing: false,
+      isOwnProfile: false,
+    }));
+  }
+
+  res.json({
+    data: usersWithFollowStatus,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+      pages: Math.ceil(total / limit),
+    },
+    query: q,
+  });
+});
+
+// GET sugerencias de usuarios a seguir (basado en quién sigue la gente que sigues)
+const suggestionsSchema = z.object({
+  query: z.object({
+    limit: z.coerce.number().min(1).max(50).default(10),
+  }),
+});
+
+socialRouter.get('/suggestions/users', authenticate, validate(suggestionsSchema), async (req, res) => {
+  const { limit } = req.query as any;
+  const userId = req.user!.id;
+
+  // Obtener usuarios que sigues
+  const userFollowing = await prisma.follow.findMany({
+    where: { followerId: userId },
+    select: { followingId: true },
+  });
+  const followingIds = userFollowing.map((f) => f.followingId);
+  followingIds.push(userId); // No sugerir el usuario a sí mismo
+
+  // Obtener usuarios que sigue la gente que tú sigues
+  const suggestions = await prisma.user.findMany({
+    where: {
+      id: {
+        notIn: followingIds,
+      },
+      status: 'ACTIVE',
+      deletedAt: null,
+    },
+    select: {
+      id: true,
+      username: true,
+      displayName: true,
+      bio: true,
+      avatarUrl: true,
+      _count: {
+        select: { followers: true, posts: true },
+      },
+    },
+    take: Number(limit),
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const suggestionsWithMutual = await Promise.all(
+    suggestions.map(async (user) => {
+      // Contar seguidores en común (usuarios que tanto yo como el sugerido seguimos)
+      const mutualFollowers = await prisma.follow.count({
+        where: {
+          followerId: { in: followingIds },
+          followingId: user.id,
+        },
+      });
+
+      return {
+        ...user,
+        mutualFollowers,
+      };
+    })
+  );
+
+  // Ordenar por cantidad de seguidores en común
+  suggestionsWithMutual.sort((a, b) => b.mutualFollowers - a.mutualFollowers);
+
+  res.json({
+    data: suggestionsWithMutual.slice(0, limit),
+    message: 'Usuarios sugeridos basados en tu red',
+  });
 });
