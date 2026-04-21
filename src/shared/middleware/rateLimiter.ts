@@ -8,6 +8,9 @@ import { env } from '../config/env';
 const sendRedisCommand: SendCommandFn = (...args: string[]) =>
   redis.call(args[0], ...args.slice(1)) as unknown as Promise<RedisReply>;
 
+// En desarrollo, aumentar límites drásticamente o deshabilitar
+const isDevelopment = process.env.NODE_ENV === 'development';
+
 function createLimiter(options: {
   windowMs: number;
   max: number;
@@ -15,9 +18,12 @@ function createLimiter(options: {
   message?: string;
   skip?: (req: Request) => boolean;
 }) {
+  // Si está en desarrollo, multiplicar por 100 los límites
+  const maxRequests = isDevelopment ? options.max * 100 : options.max;
+  
   return rateLimit({
     windowMs: options.windowMs,
-    max: options.max,
+    max: maxRequests,
     skip: options.skip,
     standardHeaders: true,
     legacyHeaders: false,

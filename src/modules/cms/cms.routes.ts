@@ -119,6 +119,7 @@ cmsRouter.get('/', validate(listPostsSchema), async (req, res) => {
         author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
         categories: { select: { category: { select: { id: true, name: true, slug: true } } } },
         tags: { select: { tag: { select: { id: true, name: true, slug: true } } } },
+        media: { include: { media: true }, orderBy: { order: 'asc' } },
       },
     }),
     prisma.post.count({ where }),
@@ -242,6 +243,7 @@ cmsRouter.patch('/:id', authenticate, validate(updatePostSchema), async (req, re
       author: { select: { id: true, username: true } },
       categories: { include: { category: true } },
       tags: { include: { tag: true } },
+      media: { include: { media: true }, orderBy: { order: 'asc' } },
     },
   });
 
