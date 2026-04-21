@@ -902,3 +902,218 @@ socialRouter.get('/users/:username/stats', async (req, res) => {
     },
   });
 });
+
+// ─────────────────────────────────────────
+//  BOOKMARKS / GUARDAR POSTS
+// ─────────────────────────────────────────
+// POST guardar/desguardar un post
+socialRouter.post('/bookmarks/:postId', authenticate, async (req, res) => {
+  const { postId } = req.params;
+  const userId = req.user!.id;
+
+  // Verificar que el post existe
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: { id: true, title: true },
+  });
+
+  if (!post) {
+    throw new AppError('Post no encontrado', 404);
+  }
+
+  // Verificar si ya está guardado
+  const existing = await prisma.bookmark.findUnique({
+    where: { userId_postId: { userId, postId } },
+  });
+
+  if (existing) {
+    // Desguardar
+    await prisma.bookmark.delete({
+      where: { userId_postId: { userId, postId } },
+    });
+
+    // Decrementar contador
+    await prisma.post.update({
+      where: { id: postId },
+      data: { bookmarksCount: { decrement: 1 } },
+    });
+
+    res.json({ bookmarked: false, message: `Quitaste ${post.title} de tus guardados` });
+    return;
+  }
+
+  // Guardar
+  await prisma.bookmark.create({
+    data: { userId, postId },
+  });
+
+  // Incrementar contador
+  await prisma.post.update({
+    where: { id: postId },
+    data: { bookmarksCount: { increment: 1 } },
+  });
+
+  res.json({ bookmarked: true, message: `Guardaste ${post.title}` });
+});
+
+// GET mis posts guardados
+const myBookmarksSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+    sortBy: z.enum(['recent', 'oldest']).default('recent'),
+  }),
+});
+
+socialRouter.get('/bookmarks', authenticate, validate(myBookmarksSchema), async (req, res) => {
+  const { page, limit, sortBy } = req.query as any;
+  const userId = req.user!.id;
+  const skip = (page - 1) * limit;
+
+  const orderBy = sortBy === 'recent' ? { createdAt: 'desc' as const } : { createdAt: 'asc' as const };
+
+  const [bookmarks, total] = await Promise.all([
+    prisma.bookmark.findMany({
+      where: { userId },
+      skip,
+      take: Number(limit),
+      orderBy,
+      select: {
+        createdAt: true,
+        post: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+            excerpt: true,
+            featuredImage: true,
+            publishedAt: true,
+            viewCount: true,
+            reactionsCount: true,
+            commentsCount: true,
+            author: {
+              select: { id: true, username: true, displayName: true, avatarUrl: true },
+            },
+            categories: {
+              select: { category: { select: { id: true, name: true, slug: true } } },
+            },
+          },
+        },
+      },
+    }),
+    prisma.bookmark.count({ where: { userId } }),
+  ]);
+
+  const formattedBookmarks = bookmarks.map((b) => ({
+    ...b.post,
+    bookmarkedAt: b.createdAt,
+  }));
+
+  res.json({
+    data: formattedBookmarks,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+      pages: Math.ceil(total / limit),
+    },
+  });
+});
+
+// GET verificar si tengo un post guardado
+socialRouter.get('/bookmark-status/:postId', authenticate, async (req, res) => {
+  const { postId } = req.params;
+  const userId = req.user!.id;
+
+  const bookmark = await prisma.bookmark.findUnique({
+    where: { userId_postId: { userId, postId } },
+  });
+
+  res.json({
+    postId,
+    bookmarked: !!bookmark,
+    bookmarkedAt: bookmark?.createdAt || null,
+  });
+});
+
+// GET posts guardados de otro usuario (si son públicos)
+const userBookmarksSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(10),
+  }),
+});
+
+socialRouter.get('/users/:username/bookmarks', validate(userBookmarksSchema), async (req, res) => {
+  const { username } = req.params;
+  const { page, limit } = req.query as any;
+  const skip = (page - 1) * limit;
+
+  // Obtener usuario
+  const user = await prisma.user.findUnique({
+    where: { username, status: 'ACTIVE', deletedAt: null },
+    select: { id: true, username: true },
+  });
+
+  if (!user) {
+    throw new AppError('Usuario no encontrado', 404);
+  }
+
+  // Obtener bookmarks (solo posts públicos publicados)
+  const [bookmarks, total] = await Promise.all([
+    prisma.bookmark.findMany({
+      where: {
+        userId: user.id,
+        post: {
+          status: 'PUBLISHED',
+          visibility: 'PUBLIC',
+          deletedAt: null,
+        },
+      },
+      skip,
+      take: Number(limit),
+      orderBy: { createdAt: 'desc' },
+      select: {
+        createdAt: true,
+        post: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+            excerpt: true,
+            featuredImage: true,
+            publishedAt: true,
+            author: {
+              select: { id: true, username: true, displayName: true, avatarUrl: true },
+            },
+          },
+        },
+      },
+    }),
+    prisma.bookmark.count({
+      where: {
+        userId: user.id,
+        post: {
+          status: 'PUBLISHED',
+          visibility: 'PUBLIC',
+          deletedAt: null,
+        },
+      },
+    }),
+  ]);
+
+  const formattedBookmarks = bookmarks.map((b) => ({
+    ...b.post,
+    bookmarkedAt: b.createdAt,
+  }));
+
+  res.json({
+    user: { username: user.username },
+    data: formattedBookmarks,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+    },
+  });
+});

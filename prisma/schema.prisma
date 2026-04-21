@@ -43,6 +43,7 @@ model User {
   reactions     Reaction[]
   followers     Follow[]   @relation("UserFollowers")
   following     Follow[]   @relation("UserFollowing")
+  bookmarks     Bookmark[]
   notifications Notification[]
   sessions      Session[]
   media         Media[]
@@ -112,6 +113,7 @@ model Post {
   tags          TagPost[]
   comments      Comment[]
   reactions     Reaction[]
+  bookmarkedBy  Bookmark[]
   media         MediaPost[]
 
   @@index([slug])
@@ -236,6 +238,21 @@ model Follow {
   @@index([followerId])
   @@index([followingId])
   @@map("follows")
+}
+
+model Bookmark {
+  id        String   @id @default(uuid())
+  userId    String
+  postId    String
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([userId])
+  @@index([postId])
+  @@map("bookmarks")
 }
 
 enum ReactionType {
