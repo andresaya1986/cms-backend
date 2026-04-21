@@ -630,3 +630,275 @@ socialRouter.get('/suggestions/users', authenticate, validate(suggestionsSchema)
     message: 'Usuarios sugeridos basados en tu red',
   });
 });
+
+// ─────────────────────────────────────────
+//  ACTIVIDAD / TIMELINE DE USUARIO
+// ─────────────────────────────────────────
+const userActivitySchema = z.object({
+  query: z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+    type: z.enum(['all', 'posts', 'comments', 'interactions']).default('all'),
+  }),
+});
+
+// GET actividad/timeline de un usuario
+socialRouter.get('/users/:username/activity', validate(userActivitySchema), async (req, res) => {
+  const { username } = req.params;
+  const { page, limit, type } = req.query as any;
+  const skip = (page - 1) * limit;
+
+  // Obtener usuario
+  const user = await prisma.user.findUnique({
+    where: { username, status: 'ACTIVE', deletedAt: null },
+    select: { id: true, username: true },
+  });
+
+  if (!user) {
+    throw new AppError('Usuario no encontrado', 404);
+  }
+
+  const activity: any[] = [];
+
+  // Posts del usuario
+  if (type === 'all' || type === 'posts') {
+    const posts = await prisma.post.findMany({
+      where: {
+        authorId: user.id,
+        status: 'PUBLISHED',
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        title: true,
+        slug: true,
+        excerpt: true,
+        publishedAt: true,
+        reactionsCount: true,
+        commentsCount: true,
+        viewCount: true,
+      },
+      orderBy: { publishedAt: 'desc' },
+      take: type === 'posts' ? limit : Math.ceil(limit / 3),
+    });
+
+    activity.push(
+      ...posts.map((post) => ({
+        type: 'POST',
+        id: post.id,
+        title: post.title,
+        slug: post.slug,
+        excerpt: post.excerpt,
+        timestamp: post.publishedAt,
+        stats: {
+          reactions: post.reactionsCount,
+          comments: post.commentsCount,
+          views: post.viewCount,
+        },
+      }))
+    );
+  }
+
+  // Comentarios del usuario
+  if (type === 'all' || type === 'comments') {
+    const comments = await prisma.comment.findMany({
+      where: {
+        authorId: user.id,
+        status: 'VISIBLE',
+        deletedAt: null,
+      },
+      include: {
+        post: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: type === 'comments' ? limit : Math.ceil(limit / 3),
+    });
+
+    activity.push(
+      ...comments.map((comment) => ({
+        type: 'COMMENT',
+        id: comment.id,
+        content: comment.content.substring(0, 100),
+        postTitle: comment.post.title,
+        postSlug: comment.post.slug,
+        postId: comment.post.id,
+        timestamp: comment.createdAt,
+        reactionsCount: comment.reactionsCount,
+      }))
+    );
+  }
+
+  // Interacciones (follows, reacciones recientes)
+  if (type === 'all' || type === 'interactions') {
+    const recentFollows = await prisma.follow.findMany({
+      where: {
+        followingId: user.id,
+      },
+      include: {
+        follower: {
+          select: {
+            id: true,
+            username: true,
+            displayName: true,
+            avatarUrl: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    });
+
+    activity.push(
+      ...recentFollows.map((follow) => ({
+        type: 'NEW_FOLLOWER',
+        id: follow.id,
+        follower: follow.follower,
+        timestamp: follow.createdAt,
+      }))
+    );
+
+    // Reacciones recientes
+    const recentReactions = await prisma.reaction.findMany({
+      where: {
+        userId: user.id,
+      },
+      include: {
+        post: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+    });
+
+    activity.push(
+      ...recentReactions.map((reaction) => ({
+        type: 'REACTION',
+        id: reaction.id,
+        reactionType: reaction.type,
+        postTitle: reaction.post?.title,
+        postSlug: reaction.post?.slug,
+        timestamp: reaction.createdAt,
+      }))
+    );
+  }
+
+  // Ordenar por timestamp descendente
+  activity.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  // Paginar
+  const paginatedActivity = activity.slice(skip, skip + limit);
+
+  res.json({
+    data: paginatedActivity,
+    user: {
+      id: user.id,
+      username: user.username,
+    },
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total: activity.length,
+    },
+    type,
+  });
+});
+
+// GET estadísticas de actividad de usuario
+socialRouter.get('/users/:username/stats', async (req, res) => {
+  const { username } = req.params;
+
+  const user = await prisma.user.findUnique({
+    where: { username, status: 'ACTIVE', deletedAt: null },
+    select: {
+      id: true,
+      username: true,
+      createdAt: true,
+      _count: {
+        select: {
+          posts: true,
+          comments: true,
+          followers: true,
+          following: true,
+          reactions: true,
+        },
+      },
+    },
+  });
+
+  if (!user) {
+    throw new AppError('Usuario no encontrado', 404);
+  }
+
+  // Calcular estadísticas de engagement
+  const userPosts = await prisma.post.findMany({
+    where: {
+      authorId: user.id,
+      status: 'PUBLISHED',
+      deletedAt: null,
+    },
+    select: {
+      reactionsCount: true,
+      commentsCount: true,
+      viewCount: true,
+    },
+  });
+
+  const totalReactions = userPosts.reduce((sum, p) => sum + p.reactionsCount, 0);
+  const totalComments = userPosts.reduce((sum, p) => sum + p.commentsCount, 0);
+  const totalViews = userPosts.reduce((sum, p) => sum + p.viewCount, 0);
+  const avgEngagementPerPost = userPosts.length > 0 
+    ? Math.round((totalReactions + totalComments) / userPosts.length)
+    : 0;
+
+  // Posts en últimos 30 días
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const recentPosts = await prisma.post.count({
+    where: {
+      authorId: user.id,
+      status: 'PUBLISHED',
+      publishedAt: { gte: thirtyDaysAgo },
+      deletedAt: null,
+    },
+  });
+
+  // Miembro desde hace
+  const memberSince = Math.floor((Date.now() - user.createdAt.getTime()) / (1000 * 60 * 60 * 24));
+
+  res.json({
+    user: {
+      id: user.id,
+      username: user.username,
+    },
+    memberStats: {
+      memberSinceDays: memberSince,
+      joinedAt: user.createdAt,
+    },
+    contentStats: {
+      totalPosts: user._count.posts,
+      totalComments: user._count.comments,
+      postsLast30Days: recentPosts,
+      avgEngagementPerPost,
+    },
+    engagementStats: {
+      receivedReactions: totalReactions,
+      receivedComments: totalComments,
+      totalViews,
+      totalReactionsGiven: user._count.reactions,
+    },
+    socialStats: {
+      followers: user._count.followers,
+      following: user._count.following,
+    },
+  });
+});
