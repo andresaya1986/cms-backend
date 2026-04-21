@@ -120,6 +120,7 @@ model Post {
   sharedBy      Share[]
   mentions      Mention[]
   media         MediaPost[]
+  hashtags      HashtagPost[]
 
   @@index([slug])
   @@index([authorId])
@@ -206,6 +207,7 @@ model Comment {
   replies   Comment[] @relation("CommentReplies")
   reactions Reaction[]
   mentions  Mention[]
+  hashtags  HashtagComment[]
 
   @@index([postId])
   @@index([authorId])
@@ -299,6 +301,56 @@ model Mention {
   @@index([postId])
   @@index([commentId])
   @@map("mentions")
+}
+
+// ─────────────────────────────────────────
+//  HASHTAGS / ETIQUETAS (#tema)
+// ─────────────────────────────────────────
+model Hashtag {
+  id        String   @id @default(uuid())
+  name      String   @unique // lowercase, sin #
+  slug      String   @unique
+  count     Int      @default(0) // cantidad de posts/comentarios
+  trendingScore Float @default(0) // para cálculos de trending
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  posts     HashtagPost[]
+  comments  HashtagComment[]
+
+  @@index([name])
+  @@index([count])
+  @@index([trendingScore])
+  @@index([createdAt])
+  @@map("hashtags")
+}
+
+model HashtagPost {
+  hashtagId String
+  postId    String
+  createdAt DateTime @default(now())
+
+  hashtag   Hashtag  @relation(fields: [hashtagId], references: [id], onDelete: Cascade)
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@id([hashtagId, postId])
+  @@index([postId])
+  @@index([hashtagId])
+  @@map("hashtag_posts")
+}
+
+model HashtagComment {
+  hashtagId String
+  commentId String
+  createdAt DateTime @default(now())
+
+  hashtag   Hashtag  @relation(fields: [hashtagId], references: [id], onDelete: Cascade)
+  comment   Comment  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@id([hashtagId, commentId])
+  @@index([commentId])
+  @@index([hashtagId])
+  @@map("hashtag_comments")
 }
 
 enum ReactionType {

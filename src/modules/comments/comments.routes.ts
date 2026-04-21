@@ -7,7 +7,7 @@ import { prisma } from '../../shared/config/databases';
 import { authenticate } from '../../shared/middleware/authenticate';
 import { validate } from '../../shared/middleware/validate';
 import { AppError } from '../../shared/errors/AppError';
-import { extractMentions } from '../../shared/utils';
+import { extractMentions, extractHashtags } from '../../shared/utils';
 
 export const commentsRouter = Router();
 
@@ -165,6 +165,28 @@ commentsRouter.post('/', authenticate, validate(createCommentSchema), async (req
           },
         }).catch(() => {});
       }
+    }
+  }
+
+  // Extraer hashtags del contenido
+  const hashtagNames = extractHashtags(content);
+
+  if (hashtagNames.length > 0) {
+    // Crear o actualizar hashtags y asociarlos al comentario
+    for (const hashtagName of hashtagNames) {
+      // Crear o encontrar hashtag
+      let hashtag = await prisma.hashtag.upsert({
+        where: { name: hashtagName },
+        update: { count: { increment: 1 } },
+        create: { name: hashtagName, slug: hashtagName },
+      });
+
+      // Asociar hashtag al comentario
+      await prisma.hashtagComment.upsert({
+        where: { hashtagId_commentId: { hashtagId: hashtag.id, commentId: comment.id } },
+        update: {},
+        create: { hashtagId: hashtag.id, commentId: comment.id },
+      }).catch(() => {});
     }
   }
 

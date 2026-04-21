@@ -1565,6 +1565,266 @@ socialRouter.get('/users/:username/mentions', async (req, res) => {
     pagination: { page: Number(page), limit: Number(limit), total },
   });
 });
+
+// ─────────────────────────────────────────
+//  HASHTAGS / ETIQUETAS (#tema)
+// ─────────────────────────────────────────
+
+// GET búsqueda de hashtags
+const searchHashtagsSchema = z.object({
+  query: z.object({
+    q: z.string().min(1).max(50),
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+  }),
+});
+
+socialRouter.get('/hashtags/search', validate(searchHashtagsSchema), async (req, res) => {
+  const { q, page, limit } = req.query as any;
+  const skip = (page - 1) * limit;
+  const query = q.toLowerCase();
+
+  const [hashtags, total] = await Promise.all([
+    prisma.hashtag.findMany({
+      where: {
+        name: { contains: query, mode: 'insensitive' },
+      },
+      skip,
+      take: Number(limit),
+      orderBy: [{ count: 'desc' }, { name: 'asc' }],
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        count: true,
+        trendingScore: true,
+        createdAt: true,
+      },
+    }),
+    prisma.hashtag.count({
+      where: {
+        name: { contains: query, mode: 'insensitive' },
+      },
+    }),
+  ]);
+
+  res.json({
+    data: hashtags.map((h) => ({ ...h, hashtag: `#${h.name}` })),
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+      pages: Math.ceil(total / limit),
+    },
+    query: q,
+  });
+});
+
+// GET trending hashtags (últimas 24h)
+const trendingHashtagsSchema = z.object({
+  query: z.object({
+    limit: z.coerce.number().min(1).max(50).default(20),
+    period: z.enum(['1h', '24h', '7d']).default('24h'),
+  }),
+});
+
+socialRouter.get('/hashtags/trending', validate(trendingHashtagsSchema), async (req, res) => {
+  const { limit, period } = req.query as any;
+
+  // Calcular fecha de corte según el período
+  let hoursAgo: number;
+  if (period === '1h') hoursAgo = 1;
+  else if (period === '7d') hoursAgo = 7 * 24;
+  else hoursAgo = 24;
+
+  const cutoffDate = new Date(Date.now() - hoursAgo * 3600 * 1000);
+
+  // Obtener hashtags con más usos en el período
+  const trendingHashtags = await prisma.hashtagPost.groupBy({
+    by: ['hashtagId'],
+    where: {
+      createdAt: { gte: cutoffDate },
+    },
+    _count: true,
+    orderBy: {
+      _count: {
+        hashtagId: 'desc',
+      },
+    },
+    take: Number(limit),
+  });
+
+  // Obtener detalles de cada hashtag
+  const hashtagIds = trendingHashtags.map((h) => h.hashtagId);
+  const hashtags = await prisma.hashtag.findMany({
+    where: { id: { in: hashtagIds } },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      count: true,
+      trendingScore: true,
+    },
+  });
+
+  // Enriquecer con datos de agrupación
+  const enriched = hashtags
+    .map((h) => ({
+      ...h,
+      hashtag: `#${h.name}`,
+      recentCount: trendingHashtags.find((t) => t.hashtagId === h.id)?._count || 0,
+    }))
+    .sort((a, b) => b.recentCount - a.recentCount);
+
+  res.json({
+    data: enriched,
+    period,
+    generatedAt: new Date(),
+  });
+});
+
+// GET posts con un hashtag específico
+const hashtagPostsSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+  }),
+});
+
+socialRouter.get('/hashtags/:name/posts', validate(hashtagPostsSchema), async (req, res) => {
+  const { name } = req.params;
+  const { page, limit } = req.query as any;
+  const skip = (page - 1) * limit;
+
+  // Obtener hashtag
+  const hashtag = await prisma.hashtag.findUnique({
+    where: { name: name.toLowerCase() },
+  });
+
+  if (!hashtag) {
+    res.json({
+      hashtag: `#${name}`,
+      data: [],
+      pagination: { page: Number(page), limit: Number(limit), total: 0 },
+      message: 'No hay posts con este hashtag',
+    });
+    return;
+  }
+
+  // Obtener posts
+  const [posts, total] = await Promise.all([
+    prisma.hashtagPost.findMany({
+      where: { hashtagId: hashtag.id },
+      skip,
+      take: Number(limit),
+      orderBy: { createdAt: 'desc' },
+      select: {
+        post: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+            excerpt: true,
+            featuredImage: true,
+            publishedAt: true,
+            reactionsCount: true,
+            commentsCount: true,
+            viewCount: true,
+            author: {
+              select: { id: true, username: true, displayName: true, avatarUrl: true },
+            },
+          },
+        },
+      },
+    }),
+    prisma.hashtagPost.count({ where: { hashtagId: hashtag.id } }),
+  ]);
+
+  res.json({
+    hashtag: `#${hashtag.name}`,
+    hashtagId: hashtag.id,
+    data: posts.map((p) => p.post),
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+      pages: Math.ceil(total / limit),
+    },
+  });
+});
+
+// GET detalles de un hashtag
+socialRouter.get('/hashtags/:name', async (req, res) => {
+  const { name } = req.params;
+
+  const hashtag = await prisma.hashtag.findUnique({
+    where: { name: name.toLowerCase() },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      count: true,
+      trendingScore: true,
+      createdAt: true,
+      _count: {
+        select: { posts: true, comments: true },
+      },
+    },
+  });
+
+  if (!hashtag) {
+    throw new AppError('Hashtag no encontrado', 404);
+  }
+
+  // Obtener últimos posts con este hashtag
+  const recentPosts = await prisma.hashtagPost.findMany({
+    where: { hashtagId: hashtag.id },
+    take: 5,
+    orderBy: { createdAt: 'desc' },
+    select: {
+      post: {
+        select: { id: true, title: true, slug: true },
+      },
+    },
+  });
+
+  res.json({
+    data: {
+      ...hashtag,
+      hashtag: `#${hashtag.name}`,
+      recentPosts: recentPosts.map((p) => p.post),
+    },
+  });
+});
+      select: {
+        id: true,
+        createdAt: true,
+        mentionedUser: {
+          select: { id: true, username: true, displayName: true },
+        },
+        post: {
+          select: { id: true, title: true, slug: true },
+        },
+        comment: {
+          select: {
+            id: true,
+            post: { select: { id: true, title: true, slug: true } },
+          },
+        },
+      },
+    }),
+    prisma.mention.count({ where: { mentionedByUserId: user.id } }),
+  ]);
+
+  res.json({
+    user: { username },
+    data: mentions.map((m) => ({
+      ...m,
+      context: m.post || m.comment?.post,
+    })),
+    pagination: { page: Number(page), limit: Number(limit), total },
+  });
+});
 const sharePostSchema = z.object({
   body: z.object({
     postId: z.string().uuid(),
