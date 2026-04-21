@@ -45,6 +45,8 @@ model User {
   following     Follow[]   @relation("UserFollowing")
   bookmarks     Bookmark[]
   shares        Share[]
+  mentions      Mention[]  @relation("MentionedUsers")
+  mentionedBy   Mention[]  @relation("MentioningUsers")
   notifications Notification[]
   sessions      Session[]
   media         Media[]
@@ -116,6 +118,7 @@ model Post {
   reactions     Reaction[]
   bookmarkedBy  Bookmark[]
   sharedBy      Share[]
+  mentions      Mention[]
   media         MediaPost[]
 
   @@index([slug])
@@ -202,6 +205,7 @@ model Comment {
   parent    Comment?  @relation("CommentReplies", fields: [parentId], references: [id])
   replies   Comment[] @relation("CommentReplies")
   reactions Reaction[]
+  mentions  Mention[]
 
   @@index([postId])
   @@index([authorId])
@@ -271,6 +275,30 @@ model Share {
   @@index([userId])
   @@index([postId])
   @@map("shares")
+}
+
+// ─────────────────────────────────────────
+//  MENTIONS / MENCIONES (@usuario)
+// ─────────────────────────────────────────
+model Mention {
+  id          String   @id @default(uuid())
+  mentionedUserId String
+  postId      String?
+  commentId   String?
+  mentionedByUserId String
+  createdAt   DateTime @default(now())
+
+  mentionedUser   User      @relation("MentionedUsers", fields: [mentionedUserId], references: [id], onDelete: Cascade)
+  mentionedByUser User      @relation("MentioningUsers", fields: [mentionedByUserId], references: [id], onDelete: Cascade)
+  post            Post?     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  comment         Comment?  @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  @@unique([mentionedUserId, postId, commentId, mentionedByUserId])
+  @@index([mentionedUserId])
+  @@index([mentionedByUserId])
+  @@index([postId])
+  @@index([commentId])
+  @@map("mentions")
 }
 
 enum ReactionType {

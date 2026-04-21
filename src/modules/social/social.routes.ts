@@ -4,6 +4,7 @@ import { prisma } from '../../shared/config/databases';
 import { authenticate } from '../../shared/middleware/authenticate';
 import { validate } from '../../shared/middleware/validate';
 import { AppError } from '../../shared/errors/AppError';
+import { extractMentions, extractHashtags } from '../../shared/utils';
 
 export const socialRouter = Router();
 
@@ -1121,6 +1122,449 @@ socialRouter.get('/users/:username/bookmarks', validate(userBookmarksSchema), as
 // ─────────────────────────────────────────
 //  SHARES / COMPARTIR POSTS
 // ─────────────────────────────────────────
+const sharePostSchema = z.object({
+  body: z.object({
+    postId: z.string().uuid(),
+    message: z.string().max(500).optional(),
+  }),
+});
+
+// POST compartir un post
+socialRouter.post('/share', authenticate, validate(sharePostSchema), async (req, res) => {
+  const { postId, message } = req.body;
+  const userId = req.user!.id;
+
+  // Verificar que el post existe y está publicado
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: { id: true, title: true, status: true, visibility: true },
+  });
+
+  if (!post) {
+    throw new AppError('Post no encontrado', 404);
+  }
+
+  if (post.status !== 'PUBLISHED') {
+    throw new AppError('No puedes compartir borradores', 400);
+  }
+
+  // Verificar si ya fue compartido
+  const existing = await prisma.share.findUnique({
+    where: { userId_postId: { userId, postId } },
+  });
+
+  if (existing) {
+    // Dejar de compartir
+    await prisma.share.delete({
+      where: { userId_postId: { userId, postId } },
+    });
+
+    // Decrementar contador
+    await prisma.post.update({
+      where: { id: postId },
+      data: { sharesCount: { decrement: 1 } },
+    });
+
+    res.json({ shared: false, message: `Dejaste de compartir "${post.title}"` });
+    return;
+  }
+
+  // Compartir
+  await prisma.share.create({
+    data: { userId, postId, message },
+  });
+
+  // Incrementar contador
+  await prisma.post.update({
+    where: { id: postId },
+    data: { sharesCount: { increment: 1 } },
+  });
+
+  res.json({ shared: true, message: `Compartiste "${post.title}"` });
+});
+
+// GET mis posts compartidos
+const mySharesSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+  }),
+});
+
+socialRouter.get('/shares', authenticate, validate(mySharesSchema), async (req, res) => {
+  const { page, limit } = req.query as any;
+  const userId = req.user!.id;
+  const skip = (page - 1) * limit;
+
+  const [shares, total] = await Promise.all([
+    prisma.share.findMany({
+      where: { userId },
+      skip,
+      take: Number(limit),
+      orderBy: { createdAt: 'desc' },
+      select: {
+        createdAt: true,
+        message: true,
+        post: {
+          select: {
+            id: true,
+            title: true,
+            slug: true,
+            excerpt: true,
+            featuredImage: true,
+            publishedAt: true,
+            author: {
+              select: { id: true, username: true, displayName: true, avatarUrl: true },
+            },
+          },
+        },
+      },
+    }),
+    prisma.share.count({ where: { userId } }),
+  ]);
+
+  const formattedShares = shares.map((s) => ({
+    ...s.post,
+    sharedAt: s.createdAt,
+    shareMessage: s.message,
+  }));
+
+  res.json({
+    data: formattedShares,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+      pages: Math.ceil(total / limit),
+    },
+  });
+});
+
+// GET personas que compartieron un post
+socialRouter.get('/shares/:postId', async (req, res) => {
+  const { postId } = req.params;
+  const { page = 1, limit = 20 } = req.query as any;
+  const skip = (page - 1) * limit;
+
+  // Verificar que el post existe
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: { id: true },
+  });
+
+  if (!post) {
+    throw new AppError('Post no encontrado', 404);
+  }
+
+  const [shares, total] = await Promise.all([
+    prisma.share.findMany({
+      where: { postId },
+      skip,
+      take: Number(limit),
+      orderBy: { createdAt: 'desc' },
+      select: {
+        createdAt: true,
+        message: true,
+        user: {
+          select: { id: true, username: true, displayName: true, avatarUrl: true },
+        },
+      },
+    }),
+    prisma.share.count({ where: { postId } }),
+  ]);
+
+  const formattedShares = shares.map((s) => ({
+    user: s.user,
+    sharedAt: s.createdAt,
+    message: s.message,
+  }));
+
+  res.json({
+    postId,
+    data: formattedShares,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+    },
+  });
+});
+
+// GET verificar si compartí un post
+socialRouter.get('/share-status/:postId', authenticate, async (req, res) => {
+  const { postId } = req.params;
+  const userId = req.user!.id;
+
+  const share = await prisma.share.findUnique({
+    where: { userId_postId: { userId, postId } },
+    select: { createdAt: true, message: true },
+  });
+
+  res.json({
+    postId,
+    shared: !!share,
+    sharedAt: share?.createdAt || null,
+    message: share?.message || null,
+  });
+});
+
+// ─────────────────────────────────────────
+//  MENTIONS / MENCIONES (@usuario)
+// ─────────────────────────────────────────
+
+// GET mis menciones (notifications que recibí)
+const myMentionsSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+    read: z.enum(['all', 'unread', 'read']).default('all'),
+  }),
+});
+
+socialRouter.get('/mentions', authenticate, validate(myMentionsSchema), async (req, res) => {
+  const { page, limit, read } = req.query as any;
+  const userId = req.user!.id;
+  const skip = (page - 1) * limit;
+
+  // Obtener mis menciones activas en posts y comentarios
+  const [mentions, total] = await Promise.all([
+    prisma.mention.findMany({
+      where: { mentionedUserId: userId },
+      skip,
+      take: Number(limit),
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        createdAt: true,
+        mentionedByUser: {
+          select: { id: true, username: true, displayName: true, avatarUrl: true },
+        },
+        post: {
+          select: { id: true, title: true, slug: true, excerpt: true },
+        },
+        comment: {
+          select: {
+            id: true,
+            content: true,
+            post: { select: { id: true, title: true, slug: true } },
+          },
+        },
+      },
+    }),
+    prisma.mention.count({ where: { mentionedUserId: userId } }),
+  ]);
+
+  const formattedMentions = mentions.map((m) => ({
+    id: m.id,
+    by: m.mentionedByUser,
+    context: m.post ?? m.comment,
+    contextType: m.post ? 'POST' : 'COMMENT',
+    mentionedAt: m.createdAt,
+  }));
+
+  res.json({
+    data: formattedMentions,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+    },
+  });
+});
+
+// GET menciones en un post específico
+socialRouter.get('/post/:postId/mentions', async (req, res) => {
+  const { postId } = req.params;
+  const { page = 1, limit = 20 } = req.query as any;
+  const skip = (page - 1) * limit;
+
+  // Verificar que el post existe
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: { id: true, title: true },
+  });
+
+  if (!post) {
+    throw new AppError('Post no encontrado', 404);
+  }
+
+  const [mentions, total] = await Promise.all([
+    prisma.mention.findMany({
+      where: { postId },
+      skip,
+      take: Number(limit),
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        createdAt: true,
+        mentionedByUser: {
+          select: { id: true, username: true, displayName: true },
+        },
+        mentionedUser: {
+          select: { id: true, username: true, displayName: true },
+        },
+      },
+    }),
+    prisma.mention.count({ where: { postId } }),
+  ]);
+
+  res.json({
+    postId,
+    postTitle: post.title,
+    data: mentions,
+    pagination: { page: Number(page), limit: Number(limit), total },
+  });
+});
+
+// POST crear mención manual (admin/internal only)
+// Normalmente las menciones se crean automáticamente al comentar/postear
+// Este endpoint es para control administrativo
+const createMentionSchema = z.object({
+  body: z.object({
+    mentionedUserId: z.string().uuid(),
+    postId: z.string().uuid().optional(),
+    commentId: z.string().uuid().optional(),
+  }),
+});
+
+socialRouter.post('/mentions', authenticate, validate(createMentionSchema), async (req, res) => {
+  const { mentionedUserId, postId, commentId } = req.body;
+  const mentionedByUserId = req.user!.id;
+
+  // Validar que una de las dos opciones está presente
+  if (!postId && !commentId) {
+    throw new AppError('Debe proporcionar postId o commentId', 400);
+  }
+
+  if (postId && commentId) {
+    throw new AppError('Solo puede ser postId o commentId, no ambos', 400);
+  }
+
+  // Verificar que el usuario mencionado existe
+  const mentionedUser = await prisma.user.findUnique({
+    where: { id: mentionedUserId },
+    select: { id: true, username: true },
+  });
+
+  if (!mentionedUser) {
+    throw new AppError('Usuario mencionado no encontrado', 404);
+  }
+
+  // No mencionarse a sí mismo
+  if (mentionedUserId === mentionedByUserId) {
+    throw new AppError('No puedes mencionarte a ti mismo', 400);
+  }
+
+  // Verificar que el post/comentario existe
+  if (postId) {
+    const post = await prisma.post.findUnique({ where: { id: postId }, select: { id: true } });
+    if (!post) {
+      throw new AppError('Post no encontrado', 404);
+    }
+  }
+
+  if (commentId) {
+    const comment = await prisma.comment.findUnique({ where: { id: commentId }, select: { id: true } });
+    if (!comment) {
+      throw new AppError('Comentario no encontrado', 404);
+    }
+  }
+
+  // Verificar si ya existe esta mención
+  const existing = await prisma.mention.findUnique({
+    where: {
+      mentionedUserId_postId_commentId_mentionedByUserId: {
+        mentionedUserId,
+        postId: postId || '',
+        commentId: commentId || '',
+        mentionedByUserId,
+      },
+    },
+  });
+
+  if (existing) {
+    res.json({ mentioned: true, message: 'Esta mención ya existe' });
+    return;
+  }
+
+  // Crear mención
+  const mention = await prisma.mention.create({
+    data: {
+      mentionedUserId,
+      mentionedByUserId,
+      postId: postId || null,
+      commentId: commentId || null,
+    },
+  });
+
+  // Crear notificación
+  await prisma.notification.create({
+    data: {
+      userId: mentionedUserId,
+      type: postId ? 'POST_MENTION' : 'COMMENT_MENTION',
+      title: `@${req.user!.username} te mencionó`,
+      body: postId ? 'Te mencionaron en un post' : 'Te mencionaron en un comentario',
+      data: { mentionId: mention.id, postId, commentId, mentionedByUserId },
+    },
+  }).catch(() => {});
+
+  res.json({
+    mentioned: true,
+    message: `@${mentionedUser.username} fue mencionado`,
+    mention,
+  });
+});
+
+// GET menciones que hizo un usuario
+socialRouter.get('/users/:username/mentions', async (req, res) => {
+  const { username } = req.params;
+  const { page = 1, limit = 20 } = req.query as any;
+  const skip = (page - 1) * limit;
+
+  const user = await prisma.user.findUnique({
+    where: { username },
+    select: { id: true },
+  });
+
+  if (!user) {
+    throw new AppError('Usuario no encontrado', 404);
+  }
+
+  const [mentions, total] = await Promise.all([
+    prisma.mention.findMany({
+      where: { mentionedByUserId: user.id },
+      skip,
+      take: Number(limit),
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        createdAt: true,
+        mentionedUser: {
+          select: { id: true, username: true, displayName: true },
+        },
+        post: {
+          select: { id: true, title: true, slug: true },
+        },
+        comment: {
+          select: {
+            id: true,
+            post: { select: { id: true, title: true, slug: true } },
+          },
+        },
+      },
+    }),
+    prisma.mention.count({ where: { mentionedByUserId: user.id } }),
+  ]);
+
+  res.json({
+    user: { username },
+    data: mentions.map((m) => ({
+      ...m,
+      context: m.post || m.comment?.post,
+    })),
+    pagination: { page: Number(page), limit: Number(limit), total },
+  });
+});
 const sharePostSchema = z.object({
   body: z.object({
     postId: z.string().uuid(),

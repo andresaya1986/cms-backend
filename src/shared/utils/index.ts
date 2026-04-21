@@ -100,6 +100,45 @@ export function extractBearerToken(authHeader?: string): string | null {
 }
 
 // ─────────────────────────────────────────
+//  Mention / Keyword extraction
+// ─────────────────────────────────────────
+/**
+ * Extrae @menciones de un texto
+ * @example extractMentions("Hola @usuario1 y @usuario2") → ["usuario1", "usuario2"]
+ */
+export function extractMentions(text: string): string[] {
+  const regex = /@(\w+)/g;
+  const mentions = new Set<string>();
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const username = match[1].toLowerCase();
+    // Validar que sea un username válido (3-30 chars, alphanumeric + _-)
+    if (/^[a-z0-9_-]{3,30}$/.test(username)) {
+      mentions.add(username);
+    }
+  }
+  return Array.from(mentions);
+}
+
+/**
+ * Extrae #hashtags de un texto
+ * @example extractHashtags("Esto es #awesome #cool") → ["awesome", "cool"]
+ */
+export function extractHashtags(text: string): string[] {
+  const regex = /#(\w+)/g;
+  const hashtags = new Set<string>();
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const tag = match[1].toLowerCase();
+    // Validar que sea válido (3-30 chars)
+    if (/^[a-z0-9]{3,30}$/.test(tag)) {
+      hashtags.add(tag);
+    }
+  }
+  return Array.from(hashtags);
+}
+
+// ─────────────────────────────────────────
 //  Formateo de bytes
 // ─────────────────────────────────────────
 export function formatBytes(bytes: number): string {

@@ -7,6 +7,7 @@ import { prisma } from '../../shared/config/databases';
 import { authenticate } from '../../shared/middleware/authenticate';
 import { validate } from '../../shared/middleware/validate';
 import { AppError } from '../../shared/errors/AppError';
+import { extractMentions } from '../../shared/utils';
 
 export const commentsRouter = Router();
 
@@ -85,12 +86,13 @@ commentsRouter.get('/', async (req, res) => {
 // POST /api/v1/comments
 commentsRouter.post('/', authenticate, validate(createCommentSchema), async (req, res) => {
   const { postId, content, parentId } = req.body;
+  const userId = req.user!.id;
 
   const post = await prisma.post.findUnique({ where: { id: postId }, select: { id: true, authorId: true } });
   if (!post) throw new AppError('Post no encontrado', 404);
 
   const comment = await prisma.comment.create({
-    data: { postId, authorId: req.user!.id, content, parentId },
+    data: { postId, authorId: userId, content, parentId },
     include: {
       author: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
     },
@@ -100,16 +102,70 @@ commentsRouter.post('/', authenticate, validate(createCommentSchema), async (req
   await prisma.post.update({ where: { id: postId }, data: { commentsCount: { increment: 1 } } });
 
   // Notificar al autor del post (si no es el mismo)
-  if (post.authorId !== req.user!.id) {
+  if (post.authorId !== userId) {
     prisma.notification.create({
       data: {
         userId: post.authorId,
         type: 'NEW_COMMENT',
         title: 'Nuevo comentario',
-        body: `@${req.user!.id} comentó en tu post`,
+        body: `@${req.user!.username} comentó en tu post`,
         data: { postId, commentId: comment.id },
       },
     }).catch(() => {});
+  }
+
+  // Extraer menciones del contenido
+  const mentionedUsernames = extractMentions(content);
+  
+  if (mentionedUsernames.length > 0) {
+    // Obtener IDs de usuarios mencionados
+    const mentionedUsers = await prisma.user.findMany({
+      where: {
+        username: { in: mentionedUsernames },
+        status: 'ACTIVE',
+        deletedAt: null,
+      },
+      select: { id: true, username: true },
+    });
+
+    // Crear registros de menciones y notificaciones
+    for (const mentionedUser of mentionedUsers) {
+      // Evitar mencionarse a sí mismo
+      if (mentionedUser.id === userId) continue;
+
+      // Crear mención
+      const existingMention = await prisma.mention.findUnique({
+        where: {
+          mentionedUserId_postId_commentId_mentionedByUserId: {
+            mentionedUserId: mentionedUser.id,
+            postId: '',
+            commentId: comment.id,
+            mentionedByUserId: userId,
+          },
+        },
+      }).catch(() => null);
+
+      if (!existingMention) {
+        await prisma.mention.create({
+          data: {
+            mentionedUserId: mentionedUser.id,
+            mentionedByUserId: userId,
+            commentId: comment.id,
+          },
+        });
+
+        // Crear notificación
+        await prisma.notification.create({
+          data: {
+            userId: mentionedUser.id,
+            type: 'COMMENT_MENTION',
+            title: `@${req.user!.username} te mencionó`,
+            body: 'Te mencionaron en un comentario',
+            data: { commentId: comment.id, postId, mentionedByUserId: userId },
+          },
+        }).catch(() => {});
+      }
+    }
   }
 
   res.status(201).json({ data: comment });
