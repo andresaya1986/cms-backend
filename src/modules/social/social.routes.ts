@@ -1830,6 +1830,21 @@ socialRouter.get('/hashtags/:name', async (req, res) => {
     },
   });
 });
+
+// GET menciones del usuario
+socialRouter.get('/mentions/:username', authenticate, async (req, res) => {
+  const { username } = req.params;
+  const user = req.user!;
+  const page = req.query.page || 1;
+  const limit = req.query.limit || 10;
+  const skip = (Number(page) - 1) * Number(limit);
+
+  const [mentions, total] = await Promise.all([
+    prisma.mention.findMany({
+      where: { mentionedByUserId: user.id },
+      skip,
+      take: Number(limit),
+      orderBy: { createdAt: 'desc' },
       select: {
         id: true,
         createdAt: true,
@@ -1857,190 +1872,5 @@ socialRouter.get('/hashtags/:name', async (req, res) => {
       context: m.post || m.comment?.post,
     })),
     pagination: { page: Number(page), limit: Number(limit), total },
-  });
-});
-const sharePostSchema = z.object({
-  body: z.object({
-    postId: z.string().uuid(),
-    message: z.string().max(500).optional(),
-  }),
-});
-
-// POST compartir un post
-socialRouter.post('/share', authenticate, validate(sharePostSchema), async (req, res) => {
-  const { postId, message } = req.body;
-  const userId = req.user!.id;
-
-  // Verificar que el post existe y está publicado
-  const post = await prisma.post.findUnique({
-    where: { id: postId },
-    select: { id: true, title: true, status: true, visibility: true },
-  });
-
-  if (!post) {
-    throw new AppError('Post no encontrado', 404);
-  }
-
-  if (post.status !== 'PUBLISHED') {
-    throw new AppError('No puedes compartir borradores', 400);
-  }
-
-  // Verificar si ya fue compartido
-  const existing = await prisma.share.findUnique({
-    where: { userId_postId: { userId, postId } },
-  });
-
-  if (existing) {
-    // Dejar de compartir
-    await prisma.share.delete({
-      where: { userId_postId: { userId, postId } },
-    });
-
-    // Decrementar contador
-    await prisma.post.update({
-      where: { id: postId },
-      data: { sharesCount: { decrement: 1 } },
-    });
-
-    res.json({ shared: false, message: `Dejaste de compartir "${post.title}"` });
-    return;
-  }
-
-  // Compartir
-  await prisma.share.create({
-    data: { userId, postId, message },
-  });
-
-  // Incrementar contador
-  await prisma.post.update({
-    where: { id: postId },
-    data: { sharesCount: { increment: 1 } },
-  });
-
-  res.json({ shared: true, message: `Compartiste "${post.title}"` });
-});
-
-// GET mis posts compartidos
-const mySharesSchema = z.object({
-  query: z.object({
-    page: z.coerce.number().min(1).default(1),
-    limit: z.coerce.number().min(1).max(50).default(20),
-  }),
-});
-
-socialRouter.get('/shares', authenticate, validate(mySharesSchema), async (req, res) => {
-  const { page, limit } = req.query as any;
-  const userId = req.user!.id;
-  const skip = (page - 1) * limit;
-
-  const [shares, total] = await Promise.all([
-    prisma.share.findMany({
-      where: { userId },
-      skip,
-      take: Number(limit),
-      orderBy: { createdAt: 'desc' },
-      select: {
-        createdAt: true,
-        message: true,
-        post: {
-          select: {
-            id: true,
-            title: true,
-            slug: true,
-            excerpt: true,
-            featuredImage: true,
-            publishedAt: true,
-            author: {
-              select: { id: true, username: true, displayName: true, avatarUrl: true },
-            },
-          },
-        },
-      },
-    }),
-    prisma.share.count({ where: { userId } }),
-  ]);
-
-  const formattedShares = shares.map((s) => ({
-    ...s.post,
-    sharedAt: s.createdAt,
-    shareMessage: s.message,
-  }));
-
-  res.json({
-    data: formattedShares,
-    pagination: {
-      page: Number(page),
-      limit: Number(limit),
-      total,
-      pages: Math.ceil(total / limit),
-    },
-  });
-});
-
-// GET personas que compartieron un post
-socialRouter.get('/shares/:postId', async (req, res) => {
-  const { postId } = req.params;
-  const { page = 1, limit = 20 } = req.query as any;
-  const skip = (page - 1) * limit;
-
-  // Verificar que el post existe
-  const post = await prisma.post.findUnique({
-    where: { id: postId },
-    select: { id: true },
-  });
-
-  if (!post) {
-    throw new AppError('Post no encontrado', 404);
-  }
-
-  const [shares, total] = await Promise.all([
-    prisma.share.findMany({
-      where: { postId },
-      skip,
-      take: Number(limit),
-      orderBy: { createdAt: 'desc' },
-      select: {
-        createdAt: true,
-        message: true,
-        user: {
-          select: { id: true, username: true, displayName: true, avatarUrl: true },
-        },
-      },
-    }),
-    prisma.share.count({ where: { postId } }),
-  ]);
-
-  const formattedShares = shares.map((s) => ({
-    user: s.user,
-    sharedAt: s.createdAt,
-    message: s.message,
-  }));
-
-  res.json({
-    postId,
-    data: formattedShares,
-    pagination: {
-      page: Number(page),
-      limit: Number(limit),
-      total,
-    },
-  });
-});
-
-// GET verificar si compartí un post
-socialRouter.get('/share-status/:postId', authenticate, async (req, res) => {
-  const { postId } = req.params;
-  const userId = req.user!.id;
-
-  const share = await prisma.share.findUnique({
-    where: { userId_postId: { userId, postId } },
-    select: { createdAt: true, message: true },
-  });
-
-  res.json({
-    postId,
-    shared: !!share,
-    sharedAt: share?.createdAt || null,
-    message: share?.message || null,
   });
 });
