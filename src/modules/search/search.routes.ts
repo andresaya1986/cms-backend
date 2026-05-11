@@ -128,9 +128,17 @@ export async function indexUser(user: any) {
         username: user.username,
         displayName: user.displayName,
         bio: user.bio,
+        role: user.role,
+        followersCount: user._count?.followers || 0,
+        followingCount: user._count?.following || 0,
+        postsCount: user._count?.posts || 0,
+        createdAt: user.createdAt,
+        isActive: user.status === 'ACTIVE' && !user.deletedAt,
       },
     });
-  } catch {}
+  } catch {
+    // No bloquear el flujo si Elasticsearch falla
+  }
 }
 
 export async function deletePostIndex(postId: string) {
@@ -186,6 +194,63 @@ searchRouter.post('/reindex', async (req, res) => {
     });
   } catch (err) {
     logger.error({ err }, 'Reindex failed');
+    throw err;
+  }
+});
+
+// ─────────────────────────────────────────
+//  POST /api/v1/search/reindex/users
+//  Reindexar todos los usuarios en Elasticsearch
+//  (En desarrollo: sin autenticación requerida)
+// ─────────────────────────────────────────
+searchRouter.post('/reindex/users', async (req, res) => {
+  try {
+    logger.info('Starting full reindex of users');
+
+    // Obtener todos los usuarios activos
+    const users = await prisma.user.findMany({
+      where: { status: 'ACTIVE', deletedAt: null },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        bio: true,
+        role: true,
+        status: true,
+        deletedAt: true,
+        createdAt: true,
+        _count: { select: { followers: true, following: true, posts: true } },
+      },
+    });
+
+    logger.info({ count: users.length }, 'Found users to index');
+
+    // Indexar cada usuario
+    let indexed = 0;
+    let failed = 0;
+
+    for (const user of users) {
+      try {
+        await indexUser(user);
+        indexed++;
+      } catch (err) {
+        logger.warn({ userId: user.id, err }, 'Failed to index user');
+        failed++;
+      }
+    }
+
+    logger.info({ indexed, failed }, 'User reindex complete');
+
+    res.json({
+      message: 'Reindex de usuarios completado',
+      stats: {
+        total: users.length,
+        indexed,
+        failed,
+      },
+    });
+  } catch (err) {
+    logger.error({ err }, 'User reindex failed');
     throw err;
   }
 });

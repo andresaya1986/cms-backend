@@ -24,7 +24,7 @@ export async function notifyUser(
     const saved = await prisma.notification.create({
       data: {
         userId,
-        type: notification.type,
+        type: notification.type as any,
         title: notification.title,
         body: notification.body,
         data: notification.data || {},
@@ -60,7 +60,7 @@ export async function notifyUsers(
   try {
     const notifications = userIds.map((userId) => ({
       userId,
-      type: notification.type,
+      type: notification.type as any,
       title: notification.title,
       body: notification.body,
       data: notification.data || {},

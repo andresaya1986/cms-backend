@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────
 import { Router } from 'express';
 import { z } from 'zod';
+import { prisma } from '../../shared/config/databases';
 import { authenticate } from '../../shared/middleware/authenticate';
 import { validate } from '../../shared/middleware/validate';
 import { AppError } from '../../shared/errors/AppError';
@@ -61,7 +62,7 @@ reactionsRouter.post(
     if (io) {
       if (postId) {
         // Obtener contadores actualizados
-        const post = await reactionsRouter.locals?.prisma?.post?.findUnique?.({
+        const post = await prisma.post.findUnique({
           where: { id: postId },
           select: { reactionsCount: true },
         });

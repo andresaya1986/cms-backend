@@ -18,6 +18,7 @@ import { validate } from '../../shared/middleware/validate';
 import { authenticate } from '../../shared/middleware/authenticate';
 import { AppError } from '../../shared/errors/AppError';
 import { logger } from '../../shared/config/logger';
+import { jobs } from '../../shared/config/workers';
 
 export const authRouter = Router();
 
@@ -232,8 +233,22 @@ authRouter.post('/register', validate(registerSchema), async (req, res) => {
   // Crear usuario
   const user = await prisma.user.create({
     data: { email, username, displayName, passwordHash },
-    select: { id: true, email: true, username: true, displayName: true, role: true },
+    select: { 
+      id: true, 
+      email: true, 
+      username: true, 
+      displayName: true, 
+      role: true,
+      bio: true,
+      status: true,
+      deletedAt: true,
+      createdAt: true,
+      _count: { select: { followers: true, following: true, posts: true } }
+    },
   });
+
+  // Encolar indexación en Elasticsearch
+  await jobs.indexUser(user);
 
   // Enviar OTP de verificación
   const otp = generateOtp();
@@ -244,7 +259,13 @@ authRouter.post('/register', validate(registerSchema), async (req, res) => {
 
   res.status(201).json({
     message: 'Registro exitoso. Revisa tu email para verificar tu cuenta.',
-    user,
+    user: {
+      id: user.id,
+      email: user.email,
+      username: user.username,
+      displayName: user.displayName,
+      role: user.role,
+    },
   });
 });
 

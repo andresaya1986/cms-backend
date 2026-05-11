@@ -4,34 +4,79 @@ import { z } from 'zod';
 import { prisma } from '../../shared/config/databases';
 import { authenticate } from '../../shared/middleware/authenticate';
 import { validate } from '../../shared/middleware/validate';
+import { AppError } from '../../shared/errors/AppError';
 
 export const notificationsRouter = Router();
 
-notificationsRouter.get('/', authenticate, async (req, res) => {
-  const { page = 1, limit = 20, unread } = req.query as any;
-  const where: any = { userId: req.user!.id };
-  if (unread === 'true') where.read = false;
+// GET todas las notificaciones del usuario autenticado
+const notificationsSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+    unreadOnly: z.enum(['true', 'false']).transform(v => v === 'true').default('false'),
+  }),
+});
 
-  const [notifications, unreadCount] = await Promise.all([
+notificationsRouter.get('/', authenticate, validate(notificationsSchema), async (req, res) => {
+  const { page, limit, unreadOnly } = req.query as any;
+  const userId = req.user!.id;
+  
+  const where: any = { userId };
+  if (unreadOnly) where.read = false;
+
+  const [notifications, total, unreadCount] = await Promise.all([
     prisma.notification.findMany({
       where,
       skip: (page - 1) * limit,
       take: Number(limit),
       orderBy: { createdAt: 'desc' },
     }),
-    prisma.notification.count({ where: { userId: req.user!.id, read: false } }),
+    prisma.notification.count({ where }),
+    prisma.notification.count({ where: { userId, read: false } }),
   ]);
 
-  res.json({ data: notifications, unreadCount });
+  // Procesar notificaciones para obtener datos del actor si está disponible
+  const processedNotifications = notifications.map((n) => {
+    // Si la notificación tiene data con información del usuario, la incluimos
+    const actorData = (n.data as any)?.actor;
+    
+    return {
+      id: n.id,
+      type: n.type,
+      title: n.title,
+      body: n.body,
+      actor: actorData || null,
+      isRead: n.read,
+      createdAt: n.createdAt,
+    };
+  });
+
+  res.json({
+    data: processedNotifications,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+      totalPages: Math.ceil(total / limit),
+      hasNextPage: page < Math.ceil(total / limit),
+      hasPreviousPage: page > 1,
+    },
+    unreadCount,
+  });
 });
 
 // GET notificaciones no leídas (lightweight para actualizaciones frecuentes)
 notificationsRouter.get('/unread/count', authenticate, async (req, res) => {
-  const unreadCount = await prisma.notification.count({
-    where: { userId: req.user!.id, read: false },
-  });
+  const [unreadCount, total] = await Promise.all([
+    prisma.notification.count({
+      where: { userId: req.user!.id, read: false },
+    }),
+    prisma.notification.count({
+      where: { userId: req.user!.id },
+    }),
+  ]);
 
-  res.json({ unreadCount });
+  res.json({ unreadCount, total });
 });
 
 // GET notificaciones por tipo
@@ -51,14 +96,14 @@ notificationsRouter.get('/type/:type', authenticate, validate(notificationsByTyp
     prisma.notification.findMany({
       where: {
         userId: req.user!.id,
-        type,
+        type: type as any,
       },
       skip: (page - 1) * limit,
       take: Number(limit),
       orderBy: { createdAt: 'desc' },
     }),
     prisma.notification.count({
-      where: { userId: req.user!.id, type },
+      where: { userId: req.user!.id, type: type as any },
     }),
   ]);
 
@@ -93,25 +138,41 @@ notificationsRouter.patch('/read-all', authenticate, async (req, res) => {
 });
 
 notificationsRouter.patch('/:id/read', authenticate, async (req, res) => {
-  const result = await prisma.notification.updateMany({
-    where: { id: req.params.id, userId: req.user!.id },
-    data: { read: true, readAt: new Date() },
+  const { id } = req.params;
+  const userId = req.user!.id;
+
+  // Verificar que la notificación existe y pertenece al usuario
+  const notification = await prisma.notification.findUnique({
+    where: { id },
   });
 
-  if (result.count === 0) {
-    return res.status(404).json({ message: 'Notificación no encontrada' });
+  if (!notification) {
+    throw new AppError('Notificación no encontrada', 404);
   }
+
+  if (notification.userId !== userId) {
+    throw new AppError('No tienes permiso para actualizar esta notificación', 403);
+  }
+
+  // Actualizar notificación
+  const updated = await prisma.notification.update({
+    where: { id },
+    data: { read: true, readAt: new Date() },
+  });
 
   // Emitir evento en tiempo real
   const io = res.req.app.get('io');
   if (io) {
-    io.to(`user:${req.user!.id}`).emit('notification:read', {
-      notificationId: req.params.id,
+    io.to(`user:${userId}`).emit('notification:read', {
+      notificationId: id,
       timestamp: new Date(),
     });
   }
 
-  res.json({ message: 'Notificación leída' });
+  res.json({
+    id: updated.id,
+    isRead: updated.read,
+  });
 });
 
 // DELETE notificación
@@ -121,7 +182,7 @@ notificationsRouter.delete('/:id', authenticate, async (req, res) => {
   });
 
   if (result.count === 0) {
-    return res.status(404).json({ message: 'Notificación no encontrada' });
+    throw new AppError('Notificación no encontrada', 404);
   }
 
   // Emitir evento en tiempo real

@@ -108,7 +108,7 @@ commentsRouter.post('/', authenticate, validate(createCommentSchema), async (req
         userId: post.authorId,
         type: 'NEW_COMMENT',
         title: 'Nuevo comentario',
-        body: `@${req.user!.username} comentó en tu post`,
+        body: `@${req.user!.username || 'usuario'} comentó en tu post`,
         data: { postId, commentId: comment.id },
       },
     }).catch(() => {});

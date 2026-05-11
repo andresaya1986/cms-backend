@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { Client } from '@elastic/elasticsearch';
 import { z } from 'zod';
 import { prisma } from '../../shared/config/databases';
 import { authenticate } from '../../shared/middleware/authenticate';
@@ -7,8 +8,16 @@ import { AppError } from '../../shared/errors/AppError';
 import { extractMentions, extractHashtags } from '../../shared/utils';
 import { notifyUser, notifyPostAuthor, emitCounterUpdate } from '../../shared/services/notifications.service';
 import { emitToPost } from '../../shared/config/socket';
+import { env } from '../../shared/config/env';
+import { logger } from '../../shared/config/logger';
 
 export const socialRouter = Router();
+
+// Elasticsearch client para búsquedas
+const esClient = new Client({
+  node: env.ELASTIC_HOST,
+  auth: { username: env.ELASTIC_USERNAME, password: env.ELASTIC_PASSWORD },
+});
 
 // ─────────────────────────────────────────
 //  FOLLOW / UNFOLLOW
@@ -20,10 +29,17 @@ socialRouter.post('/follow/:userId', authenticate, async (req, res) => {
 
   if (followerId === followingId) throw new AppError('No puedes seguirte a ti mismo', 400);
 
-  const target = await prisma.user.findUnique({
-    where: { id: followingId },
-    select: { id: true, username: true },
-  });
+  const [target, followerUser] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: followingId },
+      select: { id: true, username: true },
+    }),
+    prisma.user.findUnique({
+      where: { id: followerId },
+      select: { id: true, username: true, displayName: true, avatarUrl: true },
+    }),
+  ]);
+
   if (!target) throw new AppError('Usuario no encontrado', 404);
 
   const existing = await prisma.follow.findUnique({
@@ -39,7 +55,7 @@ socialRouter.post('/follow/:userId', authenticate, async (req, res) => {
     if (io) {
       io.to(`user:${followingId}`).emit('follower:lost', {
         followerId,
-        followerUsername: req.user!.username,
+        followerUsername: followerUser?.username || 'Unknown',
         timestamp: new Date(),
       });
     }
@@ -53,33 +69,50 @@ socialRouter.post('/follow/:userId', authenticate, async (req, res) => {
   // Obtener follower count actualizado
   const followerCount = await prisma.follow.count({ where: { followingId } });
 
-  // Notificación en DB + tiempo real
-  if (io) {
+  // Notificación en DB + tiempo real con información del actor
+  if (io && followerUser) {
     notifyUser(io, followingId, {
       type: 'NEW_FOLLOWER',
       title: `Nuevo seguidor`,
-      body: `@${req.user!.username} te sigue ahora`,
-      data: { followerId, followerUsername: req.user!.username, followerCount },
+      body: `@${followerUser.username} te sigue ahora`,
+      data: {
+        actor: {
+          id: followerUser.id,
+          username: followerUser.username,
+          displayName: followerUser.displayName,
+          avatarUrl: followerUser.avatarUrl,
+        },
+        followerCount,
+      },
     }).catch(() => {});
 
     // Emitir evento de follow en tiempo real
     io.to(`user:${followingId}`).emit('follower:gained', {
       followerId,
-      followerUsername: req.user!.username,
+      followerUsername: followerUser?.username || 'Unknown',
       followerCount,
       timestamp: new Date(),
     });
   } else {
     // Fallback a DB only si no hay io
-    prisma.notification.create({
-      data: {
-        userId: followingId,
-        type: 'NEW_FOLLOWER',
-        title: 'Nuevo seguidor',
-        body: `@${req.user!.username} te sigue ahora`,
-        data: { followerId },
-      },
-    }).catch(() => {});
+    if (followerUser) {
+      prisma.notification.create({
+        data: {
+          userId: followingId,
+          type: 'NEW_FOLLOWER',
+          title: 'Nuevo seguidor',
+          body: `@${followerUser.username} te sigue ahora`,
+          data: {
+            actor: {
+              id: followerUser.id,
+              username: followerUser.username,
+              displayName: followerUser.displayName,
+              avatarUrl: followerUser.avatarUrl,
+            },
+          },
+        },
+      }).catch(() => {});
+    }
   }
 
   res.json({ following: true, message: `Ahora sigues a @${target.username}` });
@@ -418,13 +451,29 @@ socialRouter.get('/users/:username', async (req, res) => {
 });
 
 // GET seguidores de un usuario
-socialRouter.get('/users/:username/followers', async (req, res) => {
-  const { page = 1, limit = 20 } = req.query as any;
+const followersSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+  }),
+});
+
+socialRouter.get('/users/:username/followers', validate(followersSchema), async (req, res) => {
+  const { page, limit } = req.query as any;
+  const username = req.params.username;
+  const currentUserId = req.user?.id; // Puede no estar autenticado
+
+  // Obtener usuario
   const user = await prisma.user.findUnique({
-    where: { username: req.params.username },
+    where: { username },
     select: { id: true },
   });
   if (!user) throw new AppError('Usuario no encontrado', 404);
+
+  // Contar total de followers
+  const total = await prisma.follow.count({
+    where: { followingId: user.id },
+  });
 
   const followers = await prisma.follow.findMany({
     where: { followingId: user.id },
@@ -433,23 +482,73 @@ socialRouter.get('/users/:username/followers', async (req, res) => {
     orderBy: { createdAt: 'desc' },
     select: {
       follower: {
-        select: { id: true, username: true, displayName: true, avatarUrl: true },
+        select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true },
       },
-      createdAt: true,
     },
   });
 
-  res.json({ data: followers.map((f) => ({ ...f.follower, followedAt: f.createdAt })) });
+  // Si el usuario está autenticado, obtener estado de follow para cada follower
+  let data = followers.map((f) => f.follower);
+
+  if (currentUserId) {
+    const following = await prisma.follow.findMany({
+      where: {
+        followerId: currentUserId,
+        followingId: { in: followers.map((f) => f.follower.id) },
+      },
+      select: { followingId: true },
+    });
+
+    const followingIds = new Set(following.map((f) => f.followingId));
+
+    data = followers.map((f) => ({
+      ...f.follower,
+      isFollowing: followingIds.has(f.follower.id),
+    }));
+  } else {
+    data = followers.map((f) => ({
+      ...f.follower,
+      isFollowing: false,
+    }));
+  }
+
+  res.json({
+    data,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+      totalPages: Math.ceil(total / limit),
+      hasNextPage: page < Math.ceil(total / limit),
+      hasPreviousPage: page > 1,
+    },
+  });
 });
 
 // GET usuarios que sigue (following)
-socialRouter.get('/users/:username/following', async (req, res) => {
-  const { page = 1, limit = 20 } = req.query as any;
+const followingSchema = z.object({
+  query: z.object({
+    page: z.coerce.number().min(1).default(1),
+    limit: z.coerce.number().min(1).max(50).default(20),
+  }),
+});
+
+socialRouter.get('/users/:username/following', validate(followingSchema), async (req, res) => {
+  const { page, limit } = req.query as any;
+  const username = req.params.username;
+  const currentUserId = req.user?.id; // Puede no estar autenticado
+
+  // Obtener usuario
   const user = await prisma.user.findUnique({
-    where: { username: req.params.username },
+    where: { username },
     select: { id: true },
   });
   if (!user) throw new AppError('Usuario no encontrado', 404);
+
+  // Contar total de following
+  const total = await prisma.follow.count({
+    where: { followerId: user.id },
+  });
 
   const following = await prisma.follow.findMany({
     where: { followerId: user.id },
@@ -460,18 +559,44 @@ socialRouter.get('/users/:username/following', async (req, res) => {
       following: {
         select: { id: true, username: true, displayName: true, avatarUrl: true, bio: true },
       },
-      createdAt: true,
     },
   });
 
-  res.json({ 
-    data: following.map((f) => ({ 
-      ...f.following, 
-      followedAt: f.createdAt 
-    })),
-    page,
-    limit,
-    total: following.length,
+  // Si el usuario está autenticado, obtener estado de follow para cada usuario
+  let data = following.map((f) => f.following);
+
+  if (currentUserId) {
+    const userFollowing = await prisma.follow.findMany({
+      where: {
+        followerId: currentUserId,
+        followingId: { in: following.map((f) => f.following.id) },
+      },
+      select: { followingId: true },
+    });
+
+    const userFollowingIds = new Set(userFollowing.map((f) => f.followingId));
+
+    data = following.map((f) => ({
+      ...f.following,
+      isFollowing: userFollowingIds.has(f.following.id),
+    }));
+  } else {
+    data = following.map((f) => ({
+      ...f.following,
+      isFollowing: false,
+    }));
+  }
+
+  res.json({
+    data,
+    pagination: {
+      page: Number(page),
+      limit: Number(limit),
+      total,
+      totalPages: Math.ceil(total / limit),
+      hasNextPage: page < Math.ceil(total / limit),
+      hasPreviousPage: page > 1,
+    },
   });
 });
 
@@ -506,7 +631,7 @@ socialRouter.get('/follow-status/:userId', authenticate, async (req, res) => {
 });
 
 // ─────────────────────────────────────────
-//  BÚSQUEDA DE USUARIOS
+//  BÚSQUEDA DE USUARIOS (Elasticsearch)
 // ─────────────────────────────────────────
 const searchUsersSchema = z.object({
   query: z.object({
@@ -519,83 +644,198 @@ const searchUsersSchema = z.object({
 
 socialRouter.get('/search/users', validate(searchUsersSchema), async (req, res) => {
   const { q, page, limit, role } = req.query as any;
-  const skip = (page - 1) * limit;
   const userId = req.user?.id; // Puede no estar autenticado
 
-  // Búsqueda con nombre, displayName o username
-  const where: any = {
-    status: 'ACTIVE',
-    deletedAt: null,
-    OR: [
-      { username: { contains: q, mode: 'insensitive' } },
-      { displayName: { contains: q, mode: 'insensitive' } },
-      { bio: { contains: q, mode: 'insensitive' } },
-    ],
-  };
-
-  // Filtro opcional por rol
-  if (role) {
-    where.role = role;
-  }
-
-  const [users, total] = await Promise.all([
-    prisma.user.findMany({
-      where,
-      skip,
-      take: Number(limit),
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        bio: true,
-        avatarUrl: true,
-        role: true,
-        _count: {
-          select: { followers: true, following: true, posts: true },
-        },
+  try {
+    // Construir query de Elasticsearch
+    const query: any = {
+      bool: {
+        must: [
+          {
+            multi_match: {
+              query: q,
+              fields: ['username^3', 'displayName^2', 'bio'],
+              fuzziness: 'AUTO',
+              operator: 'or',
+            },
+          },
+          {
+            term: { isActive: true },
+          },
+        ],
       },
-      orderBy: { displayName: 'asc' },
-    }),
-    prisma.user.count({ where }),
-  ]);
+    };
 
-  // Si el usuario está autenticado, obtener estado de follow
-  let usersWithFollowStatus = users;
+    // Filtro opcional por rol
+    if (role) {
+      query.bool.filter = { term: { role } };
+    }
 
-  if (userId) {
-    const follows = await prisma.follow.findMany({
-      where: {
-        followerId: userId,
-        followingId: { in: users.map((u) => u.id) },
-      },
-      select: { followingId: true },
+    const { hits } = await esClient.search({
+      index: 'cms_users',
+      from: (page - 1) * limit,
+      size: limit,
+      query,
+      sort: [{ _score: { order: 'desc' as any } }, { followersCount: { order: 'desc' as any } }],
     });
 
-    const followingIds = new Set(follows.map((f) => f.followingId));
+    const total = (hits.total as any)?.value ?? 0;
+    const userIds = hits.hits.map((h) => h._id).filter((id): id is string => !!id);
 
-    usersWithFollowStatus = users.map((user) => ({
-      ...user,
-      isFollowing: followingIds.has(user.id),
-      isOwnProfile: user.id === userId,
-    }));
-  } else {
-    usersWithFollowStatus = users.map((user) => ({
-      ...user,
-      isFollowing: false,
-      isOwnProfile: false,
-    }));
+    // Obtener datos adicionales de PostgreSQL (isFollowing, detalles actualizados)
+    let usersMap: Map<string, any> = new Map();
+
+    if (userIds.length > 0) {
+      const dbUsers = await prisma.user.findMany({
+        where: { id: { in: userIds } },
+        select: {
+          id: true,
+          username: true,
+          displayName: true,
+          bio: true,
+          avatarUrl: true,
+          role: true,
+          status: true,
+          deletedAt: true,
+          _count: {
+            select: { followers: true, following: true, posts: true },
+          },
+        },
+      });
+
+      dbUsers.forEach((u) => usersMap.set(u.id, u));
+
+      // Si está autenticado, obtener estado de follow
+      if (userId) {
+        const follows = await prisma.follow.findMany({
+          where: {
+            followerId: userId,
+            followingId: { in: userIds },
+          },
+          select: { followingId: true },
+        });
+
+        const followingIds = new Set(follows.map((f) => f.followingId));
+
+        usersMap.forEach((user, id) => {
+          user.isFollowing = followingIds.has(id);
+          user.isOwnProfile = id === userId;
+        });
+      }
+    }
+
+    // Construir respuesta manteniendo orden de Elasticsearch
+    const results = hits.hits.map((h) => {
+      const uid = h._id as string;
+      const user = usersMap.get(uid);
+      return {
+        id: uid,
+        score: h._score,
+        ...(user || (h._source as Record<string, any>)),
+        isFollowing: user?.isFollowing ?? false,
+        isOwnProfile: user?.isOwnProfile ?? false,
+        _count: user?._count || { followers: 0, following: 0, posts: 0 },
+      };
+    });
+
+    res.json({
+      data: results,
+      pagination: {
+        page: Number(page),
+        limit: Number(limit),
+        total,
+        pages: Math.ceil(total / limit),
+      },
+      query: q,
+    });
+    return;
+  } catch (err: any) {
+    // Si el índice no existe, degradar gracefully
+    if (err.name === 'ResponseError' && err.meta?.body?.error?.type === 'index_not_found_exception') {
+      return res.json({
+        data: [],
+        pagination: { page: Number(page), limit: Number(limit), total: 0, pages: 0 },
+        query: q,
+        warning: 'El índice de búsqueda aún no está inicializado. Reindexando usuarios...',
+      });
+    }
+
+    // Si Elasticsearch no está disponible, usar búsqueda SQL alternativa
+    if (err.name === 'ConnectionError') {
+      logger.warn('Elasticsearch no disponible, usando búsqueda SQL alternativa');
+      const skip = (page - 1) * limit;
+
+      const where: any = {
+        status: 'ACTIVE',
+        deletedAt: null,
+        OR: [
+          { username: { contains: q, mode: 'insensitive' } },
+          { displayName: { contains: q, mode: 'insensitive' } },
+          { bio: { contains: q, mode: 'insensitive' } },
+        ],
+      };
+
+      if (role) where.role = role;
+
+      const [users, total] = await Promise.all([
+        prisma.user.findMany({
+          where,
+          skip,
+          take: Number(limit),
+          select: {
+            id: true,
+            username: true,
+            displayName: true,
+            bio: true,
+            avatarUrl: true,
+            role: true,
+            _count: { select: { followers: true, following: true, posts: true } },
+          },
+          orderBy: { displayName: 'asc' },
+        }),
+        prisma.user.count({ where }),
+      ]);
+
+      let usersWithFollowStatus = users;
+
+      if (userId) {
+        const follows = await prisma.follow.findMany({
+          where: {
+            followerId: userId,
+            followingId: { in: users.map((u) => u.id) },
+          },
+          select: { followingId: true },
+        });
+
+        const followingIds = new Set(follows.map((f) => f.followingId));
+        usersWithFollowStatus = users.map((user) => ({
+          ...user,
+          isFollowing: followingIds.has(user.id),
+          isOwnProfile: user.id === userId,
+        }));
+      } else {
+        usersWithFollowStatus = users.map((user) => ({
+          ...user,
+          isFollowing: false,
+          isOwnProfile: false,
+        }));
+      }
+
+      return res.json({
+        data: usersWithFollowStatus,
+        pagination: {
+          page: Number(page),
+          limit: Number(limit),
+          total,
+          pages: Math.ceil(total / limit),
+        },
+        query: q,
+        warning: 'Búsqueda en modo fallback (Elasticsearch no disponible)',
+      });
+    }
+
+    throw err;
   }
-
-  res.json({
-    data: usersWithFollowStatus,
-    pagination: {
-      page: Number(page),
-      limit: Number(limit),
-      total,
-      pages: Math.ceil(total / limit),
-    },
-    query: q,
-  });
 });
 
 // GET sugerencias de usuarios a seguir (basado en quién sigue la gente que sigues)
